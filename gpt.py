@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import time
-from transformers import GPT2Tokenizer
+import tiktoken
 from dataclasses import dataclass
 
 
@@ -171,17 +171,14 @@ class GPT(nn.Module):
 
             combined_embeds = torch.cat([combined_embeds, text_embeds], dim=1)
 
-            # Pass only the new token through transformer blocks with cache
             combined_embeds[:, -1:, :], cache = self._forward_transformer_blocks(
                 combined_embeds[:, -1:, :], cache=cache
             )
-            combined_embeds = (
-                combined_embeds.detach()
-            )  # Detach to avoid keeping old graph references
+            combined_embeds = combined_embeds.detach()
             text_len += 1
 
-        del cache  # Clear the cache explicitly
-        torch.cuda.empty_cache()  # Free up unused memory
+        del cache
+        torch.cuda.empty_cache()
 
         return tokens
 
@@ -193,7 +190,6 @@ class GPT(nn.Module):
     ):
         text_embeds = self.wte(x)
 
-        # Apply positional embeddings to text tokens only
         batch_size, text_len, _ = text_embeds.size()
         pos_ids = torch.arange(0, text_len, dtype=torch.long, device=text_embeds.device)
         pos_emb = self.wpe(pos_ids).unsqueeze(0).expand(batch_size, text_len, -1)
@@ -267,7 +263,7 @@ def generate_text(model: GPT, tokenizer, initial_text="", temperature=0.8):
     returned_text = []
     for token in tokens:
         decoded = tokenizer.decode([token])
-        if token == tokenizer.eos_token_id:
+        if token == tokenizer.eot_token:
             break
         if decoded == "\n":
             returned_text.append(" ")
@@ -286,8 +282,8 @@ if __name__ == "__main__":
 
     model.load_state_dict(state_dict_transposed, strict=False)
 
-    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    tokenizer = tiktoken.get_encoding("gpt2")
 
-    prompt = "A unicorn drove itself to the mountain"
+    prompt = "<|User|>: I am sad today. <|Assistant|>: Oh, I am sad to hear that. What happened? <|User|>:"
     print(prompt, end="")
     generate_text(model, tokenizer, initial_text=prompt)
