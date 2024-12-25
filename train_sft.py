@@ -3,13 +3,21 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
+import logging
 from sft_data import SupervisedFineTuningDataset, collate_fn
 from gpt import GPT, GPTConfig, transpose_specific_layers
 
 
-def train(
-    model, dataloader, optimizer, scheduler, device, num_epochs, output_model_path
-):
+def setup_logger(log_file="training.log"):
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
+    )
+    return logging.getLogger()
+
+
+def train(model, dataloader, optimizer, scheduler, device, num_epochs, logger):
     model.train()
 
     for epoch in range(num_epochs):
@@ -37,17 +45,18 @@ def train(
 
             elapsed_time = time.time() - start_time
 
-            print(
-                f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(dataloader)}], Loss: {loss.item():.4f}, LR: {scheduler.get_last_lr()[0]:.6f}, Time: {elapsed_time:.2f}s"
+            logger.info(
+                f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(dataloader)}], Loss: {loss.item():.6f}, LR: {scheduler.get_last_lr()[0]:.8f}, Time: {elapsed_time:.2f}s"
             )
 
-        print(
+        logger.info(
             f"Epoch [{epoch+1}/{num_epochs}] completed. Average Loss: {epoch_loss / len(dataloader):.4f}"
         )
-        torch.save(model.state_dict(), output_model_path)
 
 
 def main():
+    logger = setup_logger()
+
     train_file = "train.jsonl"
     output_model_path = "gpt2_sft.pt"
     pretrained_weights = "gpt2.pt"
@@ -57,7 +66,7 @@ def main():
     num_epochs = 3
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(device)
+    logger.info(f"Using device: {device}")
 
     dataset = SupervisedFineTuningDataset(train_file, block_size=block_size)
     dataloader = DataLoader(
@@ -76,9 +85,9 @@ def main():
 
     scheduler = CosineAnnealingLR(optimizer, T_max=len(dataloader) * num_epochs)
 
-    train(
-        model, dataloader, optimizer, scheduler, device, num_epochs, output_model_path
-    )
+    train(model, dataloader, optimizer, scheduler, device, num_epochs, logger)
+
+    torch.save(model.state_dict(), output_model_path)
 
 
 if __name__ == "__main__":
