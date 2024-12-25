@@ -1,8 +1,8 @@
 import unittest
 import torch
-from sft_data import collate_fn, SupervisedFineTuningDataset
 import tempfile
 import json
+from sft_data import collate_fn, SupervisedFineTuningDataset
 
 
 class TestSupervisedFineTuning(unittest.TestCase):
