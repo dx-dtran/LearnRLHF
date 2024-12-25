@@ -125,13 +125,13 @@ def train(
                 accumulated_loss = 0.0
                 start_time = time.time()
 
-                if effective_step % (val_interval // accumulation_steps) == 0:
+                if effective_step % val_interval == 0:
                     logger.info(
                         f"Running validation subset at Epoch {epoch+1}, Effective Step {effective_step}"
                     )
                     estimate_val_loss(model, val_dataloader, device, logger)
 
-                if effective_step % (save_interval // accumulation_steps) == 0:
+                if effective_step % save_interval == 0:
                     weights_path = os.path.join(
                         weights_dir, f"gpt2_sft_{epoch+1}_{effective_step}.pt"
                     )
@@ -151,7 +151,6 @@ def main():
 
     train_file = "train.jsonl"
     test_file = "test.jsonl"
-    output_model_path = "gpt2_sft.pt"
     pretrained_weights = "gpt2.pt"
     block_size = 1024
     batch_size = 8
