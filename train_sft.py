@@ -156,6 +156,7 @@ def main():
     batch_size = 8
     learning_rate = 5e-5
     num_epochs = 3
+    accumulation_steps = 4
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
@@ -180,7 +181,8 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
-    scheduler = CosineAnnealingLR(optimizer, T_max=len(train_dataloader) * num_epochs)
+    total_global_steps = (len(train_dataloader) // accumulation_steps) * num_epochs
+    scheduler = CosineAnnealingLR(optimizer, T_max=total_global_steps)
 
     train(
         model,
@@ -192,6 +194,9 @@ def main():
         num_epochs,
         logger,
         timestamp,
+        val_interval=100,
+        save_interval=500,
+        accumulation_steps=accumulation_steps,
     )
 
 
