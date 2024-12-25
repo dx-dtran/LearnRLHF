@@ -1,7 +1,6 @@
 import json
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pad_sequence
 
 
 class SupervisedFineTuningDataset(Dataset):
@@ -44,8 +43,16 @@ def collate_fn(batch):
     input_ids = [item["input_ids"] for item in batch]
     target_ids = [item["target_ids"] for item in batch]
 
-    input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=-100)
-    target_ids_padded = pad_sequence(target_ids, batch_first=True, padding_value=-100)
+    max_length = max(len(seq) for seq in input_ids)
+
+    input_ids_padded = torch.full((len(input_ids), max_length), -100, dtype=torch.long)
+    target_ids_padded = torch.full(
+        (len(target_ids), max_length), -100, dtype=torch.long
+    )
+
+    for i, (input_seq, target_seq) in enumerate(zip(input_ids, target_ids)):
+        input_ids_padded[i, : len(input_seq)] = input_seq
+        target_ids_padded[i, : len(target_seq)] = target_seq
 
     return {
         "input_ids": input_ids_padded,
