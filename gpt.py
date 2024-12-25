@@ -147,34 +147,33 @@ class GPT(nn.Module):
         pos_emb = self.wpe(pos_ids).unsqueeze(0).expand(batch_size, text_len, -1)
         text_embeds = text_embeds + pos_emb
 
-        combined_embeds = text_embeds
         mask = self._create_causal_mask(text_len)
 
-        combined_embeds, cache = self._forward_transformer_blocks(
-            combined_embeds, mask=mask, build_cache=True
+        text_embeds, cache = self._forward_transformer_blocks(
+            text_embeds, mask=mask, build_cache=True
         )
-        combined_embeds = combined_embeds.detach()
+        text_embeds = text_embeds.detach()
 
         tokens = []
         for _ in range(max_new_tokens):
-            y = self._sample_next_token(combined_embeds[:, -1:, :], temperature)
+            y = self._sample_next_token(text_embeds[:, -1:, :], temperature)
 
             yield y
 
             tokens.append(y)
-            text_embeds = self.wte(y)
+            new_embed = self.wte(y)
 
             pos_emb = self.wpe(
                 torch.tensor([text_len], dtype=torch.long, device=y.device)
             ).unsqueeze(0)
-            text_embeds = text_embeds + pos_emb
+            new_embed = new_embed + pos_emb
 
-            combined_embeds = torch.cat([combined_embeds, text_embeds], dim=1)
+            text_embeds = torch.cat([text_embeds, new_embed], dim=1)
 
-            combined_embeds[:, -1:, :], cache = self._forward_transformer_blocks(
-                combined_embeds[:, -1:, :], cache=cache
+            text_embeds[:, -1:, :], cache = self._forward_transformer_blocks(
+                text_embeds[:, -1:, :], cache=cache
             )
-            combined_embeds = combined_embeds.detach()
+            text_embeds = text_embeds.detach()
             text_len += 1
 
         del cache
@@ -195,10 +194,7 @@ class GPT(nn.Module):
         pos_emb = self.wpe(pos_ids).unsqueeze(0).expand(batch_size, text_len, -1)
         text_embeds = text_embeds + pos_emb
 
-        combined_embeds = text_embeds
-
-        batch_size, seq_length, _ = combined_embeds.shape
-
+        batch_size, seq_length, _ = text_embeds.shape
         causal_mask = self._create_causal_mask(seq_length)
 
         assert (
@@ -213,7 +209,7 @@ class GPT(nn.Module):
         else:
             combined_mask = causal_mask
 
-        x, _ = self._forward_transformer_blocks(combined_embeds, mask=combined_mask)
+        x, _ = self._forward_transformer_blocks(text_embeds, mask=combined_mask)
         logits = x @ self.wte.weight.T
 
         if targets is not None:
@@ -284,6 +280,6 @@ if __name__ == "__main__":
 
     tokenizer = tiktoken.get_encoding("gpt2")
 
-    prompt = "<|User|>: I am sad today. <|Assistant|>: Oh, I am sad to hear that. What happened? <|User|>:"
+    prompt = "<|User|>: I am happy today. <|Assistant|>: Oh, that's great to hear! What happened? <|User|>:"
     print(prompt, end="")
     generate_text(model, tokenizer, initial_text=prompt)
