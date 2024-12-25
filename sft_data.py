@@ -5,13 +5,18 @@ from torch.nn.utils.rnn import pad_sequence
 
 
 class SupervisedFineTuningDataset(Dataset):
-    def __init__(self, jsonl_file):
+    def __init__(self, jsonl_file, block_size=1024):
         self.examples = []
+        self.block_size = block_size
 
         with open(jsonl_file, "r") as f:
             for line in f:
                 data = json.loads(line.strip())
                 input_ids = data["chosen"]
+
+                if len(input_ids) > block_size:
+                    input_ids = input_ids[:block_size]
+
                 target_ids = input_ids[1:] + [-100]
 
                 self.examples.append(
@@ -49,7 +54,7 @@ def collate_fn(batch):
 
 
 if __name__ == "__main__":
-    dataset = SupervisedFineTuningDataset("train.jsonl")
+    dataset = SupervisedFineTuningDataset("train.jsonl", block_size=1024)
     dataloader = DataLoader(dataset, batch_size=8, shuffle=True, collate_fn=collate_fn)
 
     for batch in dataloader:
