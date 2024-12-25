@@ -1,3 +1,4 @@
+import time
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -6,13 +7,17 @@ from sft_data import SupervisedFineTuningDataset, collate_fn
 from gpt import GPT, GPTConfig, transpose_specific_layers
 
 
-def train(model, dataloader, optimizer, scheduler, device, num_epochs):
+def train(
+    model, dataloader, optimizer, scheduler, device, num_epochs, output_model_path
+):
     model.train()
 
     for epoch in range(num_epochs):
         epoch_loss = 0.0
 
         for batch_idx, batch in enumerate(dataloader):
+            start_time = time.time()
+
             input_ids = batch["input_ids"].to(device)
             target_ids = batch["target_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
@@ -30,13 +35,16 @@ def train(model, dataloader, optimizer, scheduler, device, num_epochs):
 
             epoch_loss += loss.item()
 
+            elapsed_time = time.time() - start_time
+
             print(
-                f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(dataloader)}], Loss: {loss.item():.4f}"
+                f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(dataloader)}], Loss: {loss.item():.4f}, LR: {scheduler.get_last_lr()[0]:.6f}, Time: {elapsed_time:.2f}s"
             )
 
         print(
             f"Epoch [{epoch+1}/{num_epochs}] completed. Average Loss: {epoch_loss / len(dataloader):.4f}"
         )
+        torch.save(model.state_dict(), output_model_path)
 
 
 def main():
@@ -68,9 +76,9 @@ def main():
 
     scheduler = CosineAnnealingLR(optimizer, T_max=len(dataloader) * num_epochs)
 
-    train(model, dataloader, optimizer, scheduler, device, num_epochs)
-
-    torch.save(model.state_dict(), output_model_path)
+    train(
+        model, dataloader, optimizer, scheduler, device, num_epochs, output_model_path
+    )
 
 
 if __name__ == "__main__":
