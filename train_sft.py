@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import logging
 from datetime import datetime
+import os
 from sft_data import SupervisedFineTuningDataset, collate_fn
 from gpt import GPT, GPTConfig, transpose_specific_layers
 
@@ -17,7 +18,7 @@ def setup_logger():
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
     )
-    return logging.getLogger()
+    return logging.getLogger(), timestamp
 
 
 def estimate_val_loss(model, dataloader, device, logger, num_batches=10):
@@ -72,8 +73,12 @@ def train(
     device,
     num_epochs,
     logger,
+    timestamp,
     val_interval=10,
 ):
+
+    weights_dir = f"weights_{timestamp}"
+    os.makedirs(weights_dir, exist_ok=True)
 
     for epoch in range(num_epochs):
         model.train()
@@ -111,6 +116,12 @@ def train(
                 )
                 estimate_val_loss(model, val_dataloader, device, logger)
 
+                weights_path = os.path.join(
+                    weights_dir, f"gpt2_sft_{epoch+1}_{batch_idx+1}.pt"
+                )
+                torch.save(model.state_dict(), weights_path)
+                logger.info(f"Saved model weights to {weights_path}")
+
         logger.info(
             f"Epoch [{epoch+1}/{num_epochs}] completed. Average Loss: {epoch_loss / len(train_dataloader):.4f}"
         )
@@ -120,7 +131,7 @@ def train(
 
 
 def main():
-    logger = setup_logger()
+    logger, timestamp = setup_logger()
 
     train_file = "train.jsonl"
     test_file = "test.jsonl"
@@ -165,6 +176,7 @@ def main():
         device,
         num_epochs,
         logger,
+        timestamp,
     )
 
     torch.save(model.state_dict(), output_model_path)
