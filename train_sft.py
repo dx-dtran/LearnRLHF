@@ -75,6 +75,7 @@ def train(
     logger,
     timestamp,
     val_interval=500,
+    save_interval=4000,
     accumulation_steps=4,
 ):
 
@@ -121,6 +122,7 @@ def train(
                 )
                 estimate_val_loss(model, val_dataloader, device, logger)
 
+            if (batch_idx + 1) % save_interval == 0:
                 weights_path = os.path.join(
                     weights_dir, f"gpt2_sft_{epoch+1}_{batch_idx+1}.pt"
                 )
