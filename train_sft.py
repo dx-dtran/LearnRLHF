@@ -4,11 +4,14 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import logging
+from datetime import datetime
 from sft_data import SupervisedFineTuningDataset, collate_fn
 from gpt import GPT, GPTConfig, transpose_specific_layers
 
 
-def setup_logger(log_file="training.log"):
+def setup_logger():
+    timestamp = datetime.now().strftime("%m-%d-%Y-%H-%M-%S")
+    log_file = f"training-{timestamp}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
