@@ -29,7 +29,7 @@ def convert_multi_turn_to_chatml(dialogue):
 def convert_dataset_to_chatml(data):
     """
     Process the dataset, converting each entry (chosen/rejected) to ChatML.
-    Handles multi-turn conversations.
+    Handles multi-turn conversations. Excludes the system prompt.
     """
     chatml_data = []
     for entry in data:
@@ -37,14 +37,8 @@ def convert_dataset_to_chatml(data):
         rejected = entry.get("rejected", "").strip()
 
         # Convert multi-turn conversations into ChatML format
-        chatml_chosen = (
-            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-            f"{convert_multi_turn_to_chatml(chosen)}"
-        )
-        chatml_rejected = (
-            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-            f"{convert_multi_turn_to_chatml(rejected)}"
-        )
+        chatml_chosen = convert_multi_turn_to_chatml(chosen)
+        chatml_rejected = convert_multi_turn_to_chatml(rejected)
 
         # Append converted data as JSON object
         chatml_data.append({"chosen": chatml_chosen, "rejected": chatml_rejected})
