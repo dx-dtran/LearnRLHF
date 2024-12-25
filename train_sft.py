@@ -74,7 +74,8 @@ def train(
     num_epochs,
     logger,
     timestamp,
-    val_interval=100,
+    val_interval=500,
+    accumulation_steps=4,
 ):
 
     weights_dir = f"weights_{timestamp}"
@@ -83,6 +84,7 @@ def train(
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0.0
+        optimizer.zero_grad()
 
         for batch_idx, batch in enumerate(train_dataloader):
             start_time = time.time()
@@ -91,23 +93,26 @@ def train(
             target_ids = batch["target_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
 
-            optimizer.zero_grad()
-
             logits, loss = model(
                 input_ids, targets=target_ids, attention_mask=attention_mask
             )
+            loss = loss / accumulation_steps
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-            optimizer.step()
-            scheduler.step()
+            if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(
+                train_dataloader
+            ):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
 
-            epoch_loss += loss.item()
+            epoch_loss += loss.item() * accumulation_steps
 
             elapsed_time = time.time() - start_time
 
             logger.info(
-                f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_dataloader)}], Loss: {loss.item():.4f}, LR: {scheduler.get_last_lr()[0]:.6f}, Time: {elapsed_time:.2f}s"
+                f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_dataloader)}], Loss: {loss.item() * accumulation_steps:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}, Time: {elapsed_time:.2f}s"
             )
 
             if (batch_idx + 1) % val_interval == 0:
@@ -138,7 +143,7 @@ def main():
     output_model_path = "gpt2_sft.pt"
     pretrained_weights = "gpt2.pt"
     block_size = 1024
-    batch_size = 16
+    batch_size = 8
     learning_rate = 5e-5
     num_epochs = 3
 
