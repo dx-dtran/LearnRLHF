@@ -74,13 +74,15 @@ def train(
     num_epochs,
     logger,
     timestamp,
-    val_interval=500,
-    save_interval=4000,
+    val_interval=100,
+    save_interval=1000,
     accumulation_steps=4,
 ):
 
     weights_dir = f"weights_{timestamp}"
     os.makedirs(weights_dir, exist_ok=True)
+
+    effective_step = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -112,27 +114,29 @@ def train(
                 scheduler.step()
                 optimizer.zero_grad()
 
+                effective_step += 1
+
                 avg_loss = accumulated_loss / accumulation_steps
                 elapsed_time = time.time() - start_time
                 logger.info(
-                    f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_dataloader)}], Avg Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}, Time: {elapsed_time:.2f}s"
+                    f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_dataloader)}], Effective Step [{effective_step}], Avg Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}, Time: {elapsed_time:.2f}s"
                 )
 
                 accumulated_loss = 0.0
                 start_time = time.time()
 
-            if (batch_idx + 1) % val_interval == 0:
-                logger.info(
-                    f"Running validation subset at Epoch {epoch+1}, Batch {batch_idx+1}"
-                )
-                estimate_val_loss(model, val_dataloader, device, logger)
+                if effective_step % (val_interval // accumulation_steps) == 0:
+                    logger.info(
+                        f"Running validation subset at Epoch {epoch+1}, Effective Step {effective_step}"
+                    )
+                    estimate_val_loss(model, val_dataloader, device, logger)
 
-            if (batch_idx + 1) % save_interval == 0:
-                weights_path = os.path.join(
-                    weights_dir, f"gpt2_sft_{epoch+1}_{batch_idx+1}.pt"
-                )
-                torch.save(model.state_dict(), weights_path)
-                logger.info(f"Saved model weights to {weights_path}")
+                if effective_step % (save_interval // accumulation_steps) == 0:
+                    weights_path = os.path.join(
+                        weights_dir, f"gpt2_sft_{epoch+1}_{effective_step}.pt"
+                    )
+                    torch.save(model.state_dict(), weights_path)
+                    logger.info(f"Saved model weights to {weights_path}")
 
         logger.info(
             f"Epoch [{epoch+1}/{num_epochs}] completed. Average Loss: {epoch_loss / len(train_dataloader):.4f}"
