@@ -119,7 +119,7 @@ def train(
                 avg_loss = accumulated_loss / accumulation_steps
                 elapsed_time = time.time() - start_time
                 logger.info(
-                    f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_dataloader)}], Global Step [{global_step}], Avg Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}, Time: {elapsed_time:.2f}s"
+                    f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_dataloader)}], Global Step [{global_step}], Avg Loss: {avg_loss:.6f}, LR: {scheduler.get_last_lr()[0]:.8f}, Time: {elapsed_time:.2f}s"
                 )
 
                 accumulated_loss = 0.0
