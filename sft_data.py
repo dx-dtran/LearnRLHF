@@ -45,18 +45,21 @@ def collate_fn(batch):
 
     max_length = max(len(seq) for seq in input_ids)
 
-    input_ids_padded = torch.full((len(input_ids), max_length), -100, dtype=torch.long)
+    input_ids_padded = torch.full((len(input_ids), max_length), 0, dtype=torch.long)
     target_ids_padded = torch.full(
         (len(target_ids), max_length), -100, dtype=torch.long
     )
+    attention_mask = torch.zeros((len(input_ids), max_length), dtype=torch.bool)
 
     for i, (input_seq, target_seq) in enumerate(zip(input_ids, target_ids)):
         input_ids_padded[i, : len(input_seq)] = input_seq
         target_ids_padded[i, : len(target_seq)] = target_seq
+        attention_mask[i, : len(input_seq)] = True
 
     return {
         "input_ids": input_ids_padded,
         "target_ids": target_ids_padded,
+        "attention_mask": attention_mask,
     }
 
 
@@ -67,7 +70,9 @@ if __name__ == "__main__":
     for batch in dataloader:
         input_ids = batch["input_ids"]
         target_ids = batch["target_ids"]
+        attention_mask = batch["attention_mask"]
 
-        print("Input IDs:", input_ids.shape)
-        print("Target IDs:", target_ids.shape)
+        print("Input IDs:", input_ids)
+        print("Target IDs:", target_ids)
+        print("Attention Mask:", attention_mask)
         break

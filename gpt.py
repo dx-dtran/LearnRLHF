@@ -185,7 +185,7 @@ class GPT(nn.Module):
         self,
         x,
         targets=None,
-        padding_mask=None,
+        attention_mask=None,
     ):
         text_embeds = self.wte(x)
 
@@ -201,11 +201,11 @@ class GPT(nn.Module):
             seq_length <= self.config.block_size
         ), f"Cannot forward sequence of length {seq_length}, block size is only {self.config.block_size}"
 
-        if padding_mask is not None:
-            padding_mask = padding_mask.unsqueeze(1).unsqueeze(2)
+        if attention_mask is not None:
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
 
-        if padding_mask is not None:
-            combined_mask = causal_mask & padding_mask
+        if attention_mask is not None:
+            combined_mask = causal_mask & attention_mask
         else:
             combined_mask = causal_mask
 
