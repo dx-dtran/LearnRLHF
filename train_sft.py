@@ -85,6 +85,7 @@ def train(
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0.0
+        accumulated_loss = 0.0
         optimizer.zero_grad()
 
         for batch_idx, batch in enumerate(train_dataloader):
@@ -99,6 +100,7 @@ def train(
             )
             loss = loss / accumulation_steps
             loss.backward()
+            accumulated_loss += loss.item()
 
             if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(
                 train_dataloader
@@ -108,13 +110,13 @@ def train(
                 scheduler.step()
                 optimizer.zero_grad()
 
-            epoch_loss += loss.item() * accumulation_steps
+                avg_loss = accumulated_loss / accumulation_steps
+                elapsed_time = time.time() - start_time
+                logger.info(
+                    f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_dataloader)}], Avg Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}, Time: {elapsed_time:.2f}s"
+                )
 
-            elapsed_time = time.time() - start_time
-
-            logger.info(
-                f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_dataloader)}], Loss: {loss.item() * accumulation_steps:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}, Time: {elapsed_time:.2f}s"
-            )
+                accumulated_loss = 0.0
 
             if (batch_idx + 1) % val_interval == 0:
                 logger.info(
