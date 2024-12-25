@@ -98,9 +98,11 @@ def train(
             logits, loss = model(
                 input_ids, targets=target_ids, attention_mask=attention_mask
             )
+            unscaled_loss = loss.item()
             loss = loss / accumulation_steps
             loss.backward()
-            accumulated_loss += loss.item()
+
+            accumulated_loss += unscaled_loss
 
             if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(
                 train_dataloader
@@ -187,8 +189,6 @@ def main():
         logger,
         timestamp,
     )
-
-    torch.save(model.state_dict(), output_model_path)
 
 
 if __name__ == "__main__":
