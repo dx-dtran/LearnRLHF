@@ -3,7 +3,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from sft_data import SupervisedFineTuningDataset, collate_fn
-from gpt import GPT, GPTConfig
+from gpt import GPT, GPTConfig, transpose_specific_layers
 
 
 def train(model, dataloader, optimizer, scheduler, device, num_epochs):
@@ -30,10 +30,9 @@ def train(model, dataloader, optimizer, scheduler, device, num_epochs):
 
             epoch_loss += loss.item()
 
-            if batch_idx % 10 == 0:
-                print(
-                    f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(dataloader)}], Loss: {loss.item():.4f}"
-                )
+            print(
+                f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(dataloader)}], Loss: {loss.item():.4f}"
+            )
 
         print(
             f"Epoch [{epoch+1}/{num_epochs}] completed. Average Loss: {epoch_loss / len(dataloader):.4f}"
@@ -50,6 +49,7 @@ def main():
     num_epochs = 3
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(device)
 
     dataset = SupervisedFineTuningDataset(train_file, block_size=block_size)
     dataloader = DataLoader(
@@ -61,7 +61,8 @@ def main():
 
     if pretrained_weights:
         state_dict = torch.load(pretrained_weights, map_location="cpu")
-        model.load_state_dict(state_dict, strict=False)
+        state_dict_transposed = transpose_specific_layers(state_dict)
+        model.load_state_dict(state_dict_transposed, strict=False)
 
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
