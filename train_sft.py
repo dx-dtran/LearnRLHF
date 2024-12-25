@@ -86,10 +86,10 @@ def train(
         model.train()
         epoch_loss = 0.0
         accumulated_loss = 0.0
+        start_time = time.time()
         optimizer.zero_grad()
 
         for batch_idx, batch in enumerate(train_dataloader):
-            start_time = time.time()
 
             input_ids = batch["input_ids"].to(device)
             target_ids = batch["target_ids"].to(device)
@@ -119,6 +119,7 @@ def train(
                 )
 
                 accumulated_loss = 0.0
+                start_time = time.time()
 
             if (batch_idx + 1) % val_interval == 0:
                 logger.info(
