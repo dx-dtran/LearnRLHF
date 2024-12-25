@@ -1,3 +1,4 @@
+import json
 from datasets import load_dataset
 
 
@@ -45,9 +46,8 @@ def convert_dataset_to_chatml(data):
             f"{convert_multi_turn_to_chatml(rejected)}"
         )
 
-        # Append both chosen and rejected versions
-        chatml_data.append(chatml_chosen)
-        chatml_data.append(chatml_rejected)
+        # Append converted data as JSON object
+        chatml_data.append({"chosen": chatml_chosen, "rejected": chatml_rejected})
 
     return chatml_data
 
@@ -71,7 +71,7 @@ def main():
         print(f"Saving ChatML data for {subset_name} to {output_file}...")
         with open(output_file, "w") as f:
             for entry in chatml_data:
-                f.write(entry + "\n")
+                f.write(json.dumps(entry) + "\n")
 
     print("All subsets processed and saved.")
 
