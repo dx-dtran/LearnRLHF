@@ -74,7 +74,7 @@ def train(
     num_epochs,
     logger,
     timestamp,
-    val_interval=10,
+    val_interval=100,
 ):
 
     weights_dir = f"weights_{timestamp}"
@@ -138,7 +138,7 @@ def main():
     output_model_path = "gpt2_sft.pt"
     pretrained_weights = "gpt2.pt"
     block_size = 1024
-    batch_size = 8
+    batch_size = 16
     learning_rate = 5e-5
     num_epochs = 3
 
