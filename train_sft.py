@@ -195,7 +195,7 @@ def main():
         logger,
         timestamp,
         val_interval=100,
-        save_interval=500,
+        save_interval=1000,
         accumulation_steps=accumulation_steps,
     )
 

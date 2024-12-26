@@ -236,7 +236,9 @@ def transpose_specific_layers(state_dict):
     return state_dict
 
 
-def generate_text(model: GPT, tokenizer, initial_text="", temperature=0.8):
+def generate_text(
+    model: GPT, tokenizer, initial_text="", temperature=0.8, max_new_tokens=256
+):
     if initial_text:
         x = torch.tensor(
             [tokenizer.encode(initial_text)], device=model.wte.weight.device
@@ -246,7 +248,9 @@ def generate_text(model: GPT, tokenizer, initial_text="", temperature=0.8):
 
     tokens = []
     start = time.time()
-    for token in model.generate(x, max_new_tokens=64, temperature=temperature):
+    for token in model.generate(
+        x, max_new_tokens=max_new_tokens, temperature=temperature
+    ):
         tok = token.item()
         tokens.append(tok)
         print(tokenizer.decode([tok]), end="", flush=True)
@@ -273,13 +277,17 @@ if __name__ == "__main__":
     config = GPTConfig()
     model = GPT(config)
 
-    state_dict = torch.load("gpt2.pt", map_location="cpu")
-    state_dict_transposed = transpose_specific_layers(state_dict)
+    state_dict = torch.load("gpt2_sft_3_15000.pt", map_location="cpu")
+    # state_dict = torch.load("gpt2.pt", map_location="cpu")
+    # state_dict = transpose_specific_layers(state_dict)
 
-    model.load_state_dict(state_dict_transposed, strict=False)
+    model.load_state_dict(state_dict, strict=False)
 
     tokenizer = tiktoken.get_encoding("gpt2")
 
-    prompt = "<|User|>: I am happy today. <|Assistant|>: Oh, that's great to hear! What happened? <|User|>:"
+    # prompt = "Tell me your favorite fact about the Milky Way galaxy"
+    prompt = """<|im_start|>user
+Tell me your favorite fact about the Milky Way galaxy
+<|im_end|>"""
     print(prompt, end="")
-    generate_text(model, tokenizer, initial_text=prompt)
+    generate_text(model, tokenizer, initial_text=prompt, max_new_tokens=512)
