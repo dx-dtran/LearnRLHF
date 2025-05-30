@@ -67,6 +67,15 @@ if __name__ == "__main__":
     dataset = SupervisedFineTuningDataset("train.jsonl", block_size=1024)
     dataloader = DataLoader(dataset, batch_size=8, shuffle=True, collate_fn=collate_fn)
 
+    total_tokens = 0
+    with open("train.jsonl", "r") as f:
+        for line in f:
+            data = json.loads(line.strip())
+            input_ids = data["chosen"]
+            total_tokens += len(input_ids)
+
+    print(f"Total number of tokens in 'chosen' field: {total_tokens}")
+
     for batch in dataloader:
         input_ids = batch["input_ids"]
         target_ids = batch["target_ids"]
