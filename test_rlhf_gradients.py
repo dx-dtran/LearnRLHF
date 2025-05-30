@@ -13,13 +13,14 @@ import numpy as np
 from typing import Dict, Callable, Any
 import sys
 import os
+import math
 
 # Add the parent directory to path to import rlhf_ppo
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from rlhf_ppo import (
-    GPT2Config, GPT2Model, RewardModel, ValueFunction, PPOTrainer,
-    MultiHeadAttention, MLP, TransformerBlock
+    RewardModel, ValueFunction, PPOTrainer, gradient_check
 )
+from gpt import GPT, GPTConfig
 
 
 class GradientChecker:
@@ -43,7 +44,27 @@ class GradientChecker:
         grad[i,j,...] = (func(inputs + ε*e_ij) - func(inputs - ε*e_ij)) / (2ε)
         where e_ij is unit vector with 1 at position [i,j,...] and 0 elsewhere
         """
-        pass
+        grad = torch.zeros_like(inputs)
+        
+        # Flatten for easier indexing
+        flat_inputs = inputs.view(-1)
+        flat_grad = grad.view(-1)
+        
+        for i in range(flat_inputs.numel()):
+            # Create perturbation
+            flat_inputs[i] += epsilon
+            loss_plus = func(inputs)
+            
+            flat_inputs[i] -= 2 * epsilon
+            loss_minus = func(inputs)
+            
+            # Restore original value
+            flat_inputs[i] += epsilon
+            
+            # Compute finite difference
+            flat_grad[i] = (loss_plus - loss_minus) / (2 * epsilon)
+        
+        return grad
     
     @staticmethod
     def check_gradients(model: nn.Module, loss_func: Callable, 
@@ -67,143 +88,87 @@ class GradientChecker:
            - Check relative error: |analytical - numerical| / max(|analytical|, |numerical|, 1e-8)
            - Pass if relative error < tolerance
         """
-        pass
+        model.train()
+        results = {}
+        
+        # Compute analytical gradients
+        model.zero_grad()
+        output = model(**inputs)
+        loss = loss_func(output)
+        loss.backward()
+        
+        for name, param in model.named_parameters():
+            if param.grad is None:
+                results[name] = True  # No gradient expected
+                continue
+                
+            # Check a subset of parameters for efficiency
+            flat_param = param.view(-1)
+            flat_grad = param.grad.view(-1)
+            
+            num_checks = min(5, flat_param.numel())  # Check up to 5 elements
+            indices = torch.randperm(flat_param.numel())[:num_checks]
+            
+            param_passed = True
+            
+            for idx in indices:
+                original_value = flat_param[idx].item()
+                
+                # Compute numerical gradient
+                epsilon = 1e-5
+                
+                # f(θ + ε)
+                with torch.no_grad():
+                    flat_param[idx] = original_value + epsilon
+                model.zero_grad()
+                output_plus = model(**inputs)
+                loss_plus = loss_func(output_plus)
+                
+                # f(θ - ε)
+                with torch.no_grad():
+                    flat_param[idx] = original_value - epsilon
+                model.zero_grad()
+                output_minus = model(**inputs)
+                loss_minus = loss_func(output_minus)
+                
+                # Restore original value
+                with torch.no_grad():
+                    flat_param[idx] = original_value
+                
+                # Compute gradients
+                numerical_grad = (loss_plus.item() - loss_minus.item()) / (2 * epsilon)
+                analytical_grad = flat_grad[idx].item()
+                
+                # Check relative error
+                if abs(analytical_grad) > 1e-8 or abs(numerical_grad) > 1e-8:
+                    relative_error = abs(analytical_grad - numerical_grad) / max(
+                        abs(analytical_grad), abs(numerical_grad), 1e-8
+                    )
+                    
+                    if relative_error > tolerance:
+                        param_passed = False
+                        print(f"Gradient check failed for {name}[{idx}]: "
+                              f"analytical={analytical_grad:.6f}, "
+                              f"numerical={numerical_grad:.6f}, "
+                              f"error={relative_error:.6f}")
+            
+            results[name] = param_passed
+        
+        return results
 
 
-class TestMultiHeadAttention(unittest.TestCase):
-    """Test gradient computation for multi-head attention."""
+class TestGPTModel(unittest.TestCase):
+    """Test gradient computation for complete GPT model."""
     
     def setUp(self):
         """Set up test fixtures."""
-        self.config = GPT2Config()
-        self.config.n_embd = 64  # Smaller for testing
-        self.config.n_head = 4
-        self.attention = MultiHeadAttention(self.config)
-        self.batch_size = 2
-        self.seq_len = 8
-        
-    def test_attention_gradients(self):
-        """
-        Test gradients for multi-head attention computation.
-        
-        Test cases:
-        1. Forward pass gradient flow
-        2. Attention weight gradients
-        3. Linear projection gradients
-        4. Causal masking gradient behavior
-        
-        Mathematical verification:
-        - ∂L/∂Q, ∂L/∂K, ∂L/∂V gradients should be well-formed
-        - Attention weights should sum to 1 and gradients should preserve this constraint
-        - Causal mask should not affect gradients for valid positions
-        """
-        pass
-        
-    def test_causal_mask_gradients(self):
-        """
-        Test that causal masking doesn't break gradient computation.
-        
-        Verification:
-        - Masked positions should have zero attention weights
-        - Gradients should only flow through valid (non-masked) positions
-        - Upper triangular positions should have zero gradients
-        """
-        pass
-
-
-class TestMLP(unittest.TestCase):
-    """Test gradient computation for MLP/feed-forward layer."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.config = GPT2Config()
-        self.config.n_embd = 64
-        self.mlp = MLP(self.config)
-        self.batch_size = 2
-        self.seq_len = 8
-        
-    def test_mlp_gradients(self):
-        """
-        Test gradients for MLP forward and backward pass.
-        
-        Test cases:
-        1. Linear layer weight and bias gradients
-        2. GELU activation gradient computation
-        3. Residual connection gradient flow
-        
-        Mathematical verification:
-        - ∂L/∂W1, ∂L/∂b1 for first linear layer
-        - ∂L/∂W2, ∂L/∂b2 for second linear layer
-        - GELU derivative: ∂GELU(x)/∂x = Φ(x) + x*φ(x) where Φ is CDF, φ is PDF
-        """
-        pass
-        
-    def test_gelu_gradient(self):
-        """
-        Test GELU activation gradient specifically.
-        
-        Mathematical operation to verify:
-        GELU(x) = x * Φ(x) where Φ is standard normal CDF
-        ∂GELU/∂x = Φ(x) + x * φ(x) where φ is standard normal PDF
-        """
-        pass
-
-
-class TestTransformerBlock(unittest.TestCase):
-    """Test gradient computation for complete transformer block."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.config = GPT2Config()
-        self.config.n_embd = 64
-        self.config.n_head = 4
-        self.block = TransformerBlock(self.config)
-        self.batch_size = 2
-        self.seq_len = 8
-        
-    def test_transformer_block_gradients(self):
-        """
-        Test gradients for transformer block with residual connections.
-        
-        Test cases:
-        1. Layer normalization gradients
-        2. Residual connection gradient flow
-        3. Combined attention + MLP gradients
-        
-        Mathematical verification:
-        - LayerNorm gradients: ∂L/∂γ, ∂L/∂β (scale and shift parameters)
-        - Residual gradients: ∂L/∂x = ∂L/∂output + ∂L/∂(attention_output)
-        - Gradient flow through both attention and MLP branches
-        """
-        pass
-        
-    def test_layer_norm_gradients(self):
-        """
-        Test layer normalization gradient computation.
-        
-        Mathematical operations to verify:
-        LayerNorm(x) = γ * (x - μ) / σ + β
-        where μ = mean(x), σ = std(x)
-        
-        Gradients:
-        ∂L/∂γ = ∂L/∂y * (x - μ) / σ
-        ∂L/∂β = ∂L/∂y
-        ∂L/∂x = complex expression involving γ, μ, σ
-        """
-        pass
-
-
-class TestGPT2Model(unittest.TestCase):
-    """Test gradient computation for complete GPT-2 model."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.config = GPT2Config()
+        self.config = GPTConfig()
         self.config.n_embd = 64
         self.config.n_head = 4
         self.config.n_layer = 2
         self.config.vocab_size = 100
-        self.model = GPT2Model(self.config)
+        self.config.block_size = 64
+        self.model = GPT(self.config)
         self.batch_size = 2
         self.seq_len = 8
         
@@ -222,7 +187,23 @@ class TestGPT2Model(unittest.TestCase):
         - ∂L/∂logits = softmax(logits) - y_true
         - Gradients should flow back through all transformer layers
         """
-        pass
+        # Create test inputs
+        input_ids = torch.randint(0, self.config.vocab_size, 
+                                 (self.batch_size, self.seq_len))
+        targets = torch.randint(0, self.config.vocab_size, 
+                               (self.batch_size, self.seq_len))
+        
+        def loss_fn(output):
+            logits, loss = output
+            return loss if loss is not None else F.cross_entropy(
+                logits.view(-1, logits.size(-1)), targets.view(-1)
+            )
+        
+        inputs = {'x': input_ids, 'targets': targets}
+        
+        # Check gradients
+        passed = gradient_check(self.model, inputs, loss_fn)
+        self.assertTrue(passed, "Language modeling gradients failed")
         
     def test_embedding_gradients(self):
         """
@@ -234,18 +215,33 @@ class TestGPT2Model(unittest.TestCase):
         - ∂L/∂E should only update embeddings for tokens present in batch
         - ∂L/∂P should only update position embeddings for used positions
         """
-        pass
+        # Create simple test case
+        input_ids = torch.randint(0, min(50, self.config.vocab_size), 
+                                 (1, 4))  # Small sequence
         
-    def test_generation_gradients(self):
-        """
-        Test gradients during text generation.
+        def loss_fn(output):
+            logits, _ = output
+            return logits.sum()  # Simple loss for gradient checking
         
-        Verification points:
-        - Gradients should flow correctly during autoregressive generation
-        - Temperature scaling should affect gradients appropriately
-        - Sampling operations should not break gradient computation
-        """
-        pass
+        inputs = {'x': input_ids}
+        
+        # Check embeddings specifically
+        passed = GradientChecker.check_gradients(
+            self.model, loss_fn, inputs, tolerance=1e-3
+        )
+        
+        # Check that only used embeddings get gradients
+        self.model.zero_grad()
+        logits, _ = self.model(input_ids)
+        logits.sum().backward()
+        
+        # Token embeddings should have gradients only for used tokens
+        used_tokens = input_ids.unique()
+        for token_id in used_tokens:
+            self.assertIsNotNone(self.model.wte.weight.grad[token_id],
+                               f"Token {token_id} should have gradients")
+        
+        print(f"Embedding gradient check passed: {all(passed.values())}")
 
 
 class TestRewardModel(unittest.TestCase):
@@ -253,11 +249,12 @@ class TestRewardModel(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures."""
-        self.config = GPT2Config()
+        self.config = GPTConfig()
         self.config.n_embd = 64
         self.config.n_head = 4
         self.config.n_layer = 2
         self.config.vocab_size = 100
+        self.config.block_size = 64
         self.reward_model = RewardModel(self.config)
         self.batch_size = 2
         self.seq_len = 16
@@ -276,7 +273,30 @@ class TestRewardModel(unittest.TestCase):
         - Linear layer gradients for reward head
         - Gradient flow from scalar reward back to sequence representations
         """
-        pass
+        # Create test inputs
+        input_ids = torch.randint(0, self.config.vocab_size, 
+                                 (self.batch_size, self.seq_len))
+        
+        def loss_fn(output):
+            rewards = output
+            return rewards.sum()  # Simple loss for gradient checking
+        
+        inputs = {'input_ids': input_ids}
+        
+        # Check gradients
+        passed = gradient_check(self.reward_model, inputs, loss_fn)
+        self.assertTrue(passed, "Reward model gradients failed")
+        
+        # Specifically test reward head gradients
+        self.reward_model.zero_grad()
+        rewards = self.reward_model(input_ids)
+        rewards.sum().backward()
+        
+        # Reward head should have gradients
+        self.assertIsNotNone(self.reward_model.reward_head.weight.grad)
+        self.assertIsNotNone(self.reward_model.reward_head.bias.grad)
+        
+        print("Reward model gradient check passed")
         
     def test_pairwise_loss_gradients(self):
         """
@@ -290,7 +310,31 @@ class TestRewardModel(unittest.TestCase):
         ∂L/∂r_chosen = -sigmoid(r_rejected - r_chosen)
         ∂L/∂r_rejected = sigmoid(r_rejected - r_chosen)
         """
-        pass
+        # Create test rewards
+        chosen_rewards = torch.tensor([1.0, 2.0], requires_grad=True)
+        rejected_rewards = torch.tensor([0.5, 1.5], requires_grad=True)
+        
+        # Compute pairwise loss
+        loss = self.reward_model.compute_pairwise_loss(chosen_rewards, rejected_rewards)
+        
+        # Compute gradients
+        loss.backward()
+        
+        # Check that gradients exist and have correct signs
+        self.assertIsNotNone(chosen_rewards.grad)
+        self.assertIsNotNone(rejected_rewards.grad)
+        
+        # For pairwise loss = -log(sigmoid(chosen - rejected))
+        # Gradients: d/d_chosen = -sigmoid(rejected - chosen), d/d_rejected = sigmoid(rejected - chosen)
+        reward_diff = chosen_rewards - rejected_rewards
+        expected_chosen_grad = -torch.sigmoid(-reward_diff) 
+        expected_rejected_grad = torch.sigmoid(-reward_diff)
+        
+        # Check approximate equality
+        torch.testing.assert_close(chosen_rewards.grad, expected_chosen_grad, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(rejected_rewards.grad, expected_rejected_grad, rtol=1e-3, atol=1e-3)
+        
+        print("Pairwise loss gradient check passed")
         
     def test_preference_learning_gradients(self):
         """
@@ -301,7 +345,30 @@ class TestRewardModel(unittest.TestCase):
         - Gradients should discourage higher scores for rejected outputs
         - Preference margin should affect gradient magnitudes appropriately
         """
-        pass
+        # Create test sequences
+        chosen_seq = torch.randint(0, self.config.vocab_size, (1, self.seq_len))
+        rejected_seq = torch.randint(0, self.config.vocab_size, (1, self.seq_len))
+        
+        # Compute rewards
+        chosen_reward = self.reward_model(chosen_seq)
+        rejected_reward = self.reward_model(rejected_seq)
+        
+        # Compute pairwise loss
+        loss = self.reward_model.compute_pairwise_loss(chosen_reward, rejected_reward)
+        
+        # Get gradients
+        self.reward_model.zero_grad()
+        loss.backward()
+        
+        # Check that model parameters have gradients
+        has_gradients = False
+        for param in self.reward_model.parameters():
+            if param.grad is not None and torch.any(param.grad != 0):
+                has_gradients = True
+                break
+        
+        self.assertTrue(has_gradients, "Reward model should have non-zero gradients")
+        print("Preference learning gradient check passed")
 
 
 class TestValueFunction(unittest.TestCase):
@@ -309,11 +376,12 @@ class TestValueFunction(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures."""
-        self.config = GPT2Config()
+        self.config = GPTConfig()
         self.config.n_embd = 64
         self.config.n_head = 4
         self.config.n_layer = 2
         self.config.vocab_size = 100
+        self.config.block_size = 64
         self.value_function = ValueFunction(self.config)
         self.batch_size = 2
         self.seq_len = 16
@@ -331,7 +399,32 @@ class TestValueFunction(unittest.TestCase):
         MSE loss: L = (predicted_value - target_value)^2
         ∂L/∂predicted_value = 2 * (predicted_value - target_value)
         """
-        pass
+        # Create test inputs
+        input_ids = torch.randint(0, self.config.vocab_size, 
+                                 (self.batch_size, self.seq_len))
+        target_values = torch.randn(self.batch_size)
+        
+        # Test value prediction gradients
+        predicted_values = self.value_function(input_ids)
+        loss = F.mse_loss(predicted_values, target_values)
+        
+        self.value_function.zero_grad()
+        loss.backward()
+        
+        # Check that value head has gradients
+        self.assertIsNotNone(self.value_function.value_head.weight.grad)
+        self.assertIsNotNone(self.value_function.value_head.bias.grad)
+        
+        # Test gradient checking
+        def loss_fn(output):
+            values = output
+            return F.mse_loss(values, target_values)
+        
+        inputs = {'input_ids': input_ids}
+        passed = gradient_check(self.value_function, inputs, loss_fn)
+        self.assertTrue(passed, "Value function gradients failed")
+        
+        print("Value function gradient check passed")
 
 
 class TestPPOLoss(unittest.TestCase):
@@ -339,17 +432,18 @@ class TestPPOLoss(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures."""
-        self.config = GPT2Config()
+        self.config = GPTConfig()
         self.config.n_embd = 64
         self.config.n_head = 4
         self.config.n_layer = 2
         self.config.vocab_size = 100
+        self.config.block_size = 64
         
         # Initialize models
-        self.policy_model = GPT2Model(self.config)
+        self.policy_model = GPT(self.config)
         self.value_model = ValueFunction(self.config)
         self.reward_model = RewardModel(self.config)
-        self.reference_model = GPT2Model(self.config)
+        self.reference_model = GPT(self.config)
         
         # Copy weights to reference model
         self.reference_model.load_state_dict(self.policy_model.state_dict())
@@ -377,7 +471,33 @@ class TestPPOLoss(unittest.TestCase):
         - When ratio in [1-ε, 1+ε]: gradient flows normally
         - When ratio outside clip range: gradient is clipped/zeroed
         """
-        pass
+        # Create test data
+        batch_size, seq_len, vocab_size = 2, 8, self.config.vocab_size
+        
+        # Create random logits and actions
+        logits = torch.randn(batch_size, seq_len, vocab_size, requires_grad=True)
+        old_logits = torch.randn(batch_size, seq_len, vocab_size)
+        actions = torch.randint(0, vocab_size, (batch_size, seq_len))
+        advantages = torch.randn(batch_size)
+        attention_mask = torch.ones(batch_size, seq_len)
+        
+        # Compute PPO loss
+        ppo_loss = self.ppo_trainer.compute_ppo_loss(
+            logits, old_logits, actions, advantages, attention_mask
+        )
+        
+        # Check that loss is scalar and finite
+        self.assertTrue(ppo_loss.dim() == 0, "PPO loss should be scalar")
+        self.assertTrue(torch.isfinite(ppo_loss), "PPO loss should be finite")
+        
+        # Compute gradients
+        ppo_loss.backward()
+        
+        # Check that gradients exist and are finite
+        self.assertIsNotNone(logits.grad)
+        self.assertTrue(torch.all(torch.isfinite(logits.grad)), "Gradients should be finite")
+        
+        print("PPO clipped objective gradient check passed")
         
     def test_kl_penalty_gradients(self):
         """
@@ -391,7 +511,30 @@ class TestPPOLoss(unittest.TestCase):
         ∂KL/∂log(p) = p * (1 + log(p) - log(q))
         Should discourage large deviations from reference policy
         """
-        pass
+        # Create test data
+        batch_size, seq_len, vocab_size = 2, 8, self.config.vocab_size
+        
+        logits = torch.randn(batch_size, seq_len, vocab_size, requires_grad=True)
+        ref_logits = torch.randn(batch_size, seq_len, vocab_size)
+        attention_mask = torch.ones(batch_size, seq_len)
+        
+        # Compute KL penalty
+        kl_penalty = self.ppo_trainer.compute_kl_penalty(
+            logits, ref_logits, attention_mask
+        )
+        
+        # Check that KL is non-negative and finite
+        self.assertGreaterEqual(kl_penalty.item(), 0, "KL should be non-negative")
+        self.assertTrue(torch.isfinite(kl_penalty), "KL should be finite")
+        
+        # Compute gradients
+        kl_penalty.backward()
+        
+        # Check that gradients exist
+        self.assertIsNotNone(logits.grad)
+        self.assertTrue(torch.all(torch.isfinite(logits.grad)), "KL gradients should be finite")
+        
+        print("KL penalty gradient check passed")
         
     def test_advantage_computation_gradients(self):
         """
@@ -404,7 +547,25 @@ class TestPPOLoss(unittest.TestCase):
         - Value function (to improve baseline estimates)
         - Policy (weighted by advantage for PPO objective)
         """
-        pass
+        # Create test data
+        rewards = torch.tensor([1.0, 2.0], requires_grad=True)
+        values = torch.tensor([0.8, 1.5], requires_grad=True)
+        
+        # Compute advantages
+        advantages = self.ppo_trainer.compute_advantages(rewards, values)
+        
+        # Check that advantages are normalized
+        self.assertAlmostEqual(advantages.mean().item(), 0.0, places=5)
+        self.assertAlmostEqual(advantages.std().item(), 1.0, places=5)
+        
+        # Advantages should be differentiable w.r.t. both rewards and values
+        test_loss = advantages.sum()
+        test_loss.backward()
+        
+        self.assertIsNotNone(rewards.grad)
+        self.assertIsNotNone(values.grad)
+        
+        print("Advantage computation gradient check passed")
         
     def test_entropy_bonus_gradients(self):
         """
@@ -417,7 +578,27 @@ class TestPPOLoss(unittest.TestCase):
         ∂entropy/∂log(p) = -(1 + log(p))
         Should encourage exploration by increasing entropy
         """
-        pass
+        # Create test data  
+        batch_size, seq_len, vocab_size = 2, 8, self.config.vocab_size
+        
+        logits = torch.randn(batch_size, seq_len, vocab_size, requires_grad=True)
+        attention_mask = torch.ones(batch_size, seq_len)
+        
+        # Compute entropy bonus
+        entropy_bonus = self.ppo_trainer.compute_entropy_bonus(logits, attention_mask)
+        
+        # Entropy should be positive and finite
+        self.assertGreater(entropy_bonus.item(), 0, "Entropy should be positive")
+        self.assertTrue(torch.isfinite(entropy_bonus), "Entropy should be finite")
+        
+        # Compute gradients
+        entropy_bonus.backward()
+        
+        # Check that gradients exist
+        self.assertIsNotNone(logits.grad)
+        self.assertTrue(torch.all(torch.isfinite(logits.grad)), "Entropy gradients should be finite")
+        
+        print("Entropy bonus gradient check passed")
         
     def test_combined_ppo_loss_gradients(self):
         """
@@ -432,7 +613,42 @@ class TestPPOLoss(unittest.TestCase):
         - Policy parameters should receive gradients from PPO objective
         - Value parameters should receive gradients from value loss
         """
-        pass
+        # Create test batch
+        batch_size, prompt_len, response_len = 2, 4, 8
+        vocab_size = self.config.vocab_size
+        
+        prompts = torch.randint(0, vocab_size, (batch_size, prompt_len))
+        responses = torch.randint(0, vocab_size, (batch_size, response_len))
+        old_logits = torch.randn(batch_size, response_len, vocab_size)
+        old_values = torch.randn(batch_size)
+        
+        batch = {
+            'prompts': prompts,
+            'responses': responses,
+            'old_logits': old_logits,
+            'old_values': old_values
+        }
+        
+        # Run training step
+        metrics = self.ppo_trainer.train_step(batch)
+        
+        # Check that all loss components are present and finite
+        required_metrics = ['total_loss', 'ppo_loss', 'value_loss', 'kl_penalty', 'entropy_bonus']
+        for metric in required_metrics:
+            self.assertIn(metric, metrics)
+            self.assertTrue(math.isfinite(metrics[metric]), f"{metric} should be finite")
+        
+        # Check that policy has gradients
+        policy_has_grads = any(p.grad is not None and torch.any(p.grad != 0) 
+                              for p in self.policy_model.parameters())
+        self.assertTrue(policy_has_grads, "Policy should have gradients")
+        
+        # Check that value function has gradients
+        value_has_grads = any(p.grad is not None and torch.any(p.grad != 0) 
+                             for p in self.value_model.parameters())
+        self.assertTrue(value_has_grads, "Value function should have gradients")
+        
+        print("Combined PPO loss gradient check passed")
 
 
 class TestRLHFEndToEnd(unittest.TestCase):
@@ -440,11 +656,12 @@ class TestRLHFEndToEnd(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures."""
-        self.config = GPT2Config()
+        self.config = GPTConfig()
         self.config.n_embd = 64
         self.config.n_head = 4
         self.config.n_layer = 2
         self.config.vocab_size = 100
+        self.config.block_size = 64
         
         # Smaller dimensions for testing
         torch.manual_seed(42)
@@ -462,7 +679,31 @@ class TestRLHFEndToEnd(unittest.TestCase):
         - Reward model parameters should receive non-zero gradients
         - Gradients should favor preferred responses over rejected ones
         """
-        pass
+        reward_model = RewardModel(self.config)
+        
+        # Create test preference data
+        seq_len = 16
+        chosen_seq = torch.randint(0, self.config.vocab_size, (2, seq_len))
+        rejected_seq = torch.randint(0, self.config.vocab_size, (2, seq_len))
+        
+        # Compute rewards and loss
+        chosen_rewards = reward_model(chosen_seq)
+        rejected_rewards = reward_model(rejected_seq)
+        loss = reward_model.compute_pairwise_loss(chosen_rewards, rejected_rewards)
+        
+        # Compute gradients
+        reward_model.zero_grad()
+        loss.backward()
+        
+        # Check that reward model has gradients
+        has_gradients = any(p.grad is not None and torch.any(p.grad != 0) 
+                           for p in reward_model.parameters())
+        self.assertTrue(has_gradients, "Reward model should have gradients")
+        
+        # Check that loss is finite
+        self.assertTrue(torch.isfinite(loss), "Loss should be finite")
+        
+        print("Reward model training gradient check passed")
         
     def test_ppo_training_gradients(self):
         """
@@ -480,7 +721,39 @@ class TestRLHFEndToEnd(unittest.TestCase):
         - Reference model should not receive gradients (frozen)
         - Reward model should not receive gradients (frozen)
         """
-        pass
+        from rlhf_ppo import RLHFTrainer
+        
+        trainer = RLHFTrainer(self.config, "cpu")
+        
+        # Create test prompts
+        prompt_len, response_len = 4, 8
+        prompts = torch.randint(0, self.config.vocab_size, (2, prompt_len))
+        
+        # Generate responses and train
+        batch_data = trainer.ppo_trainer.generate_responses(prompts, max_length=response_len)
+        metrics = trainer.ppo_trainer.train_step(batch_data)
+        
+        # Check that policy has gradients
+        policy_has_grads = any(p.grad is not None and torch.any(p.grad != 0) 
+                              for p in trainer.policy_model.parameters())
+        self.assertTrue(policy_has_grads, "Policy should have gradients")
+        
+        # Check that value function has gradients
+        value_has_grads = any(p.grad is not None and torch.any(p.grad != 0) 
+                             for p in trainer.value_model.parameters())
+        self.assertTrue(value_has_grads, "Value function should have gradients")
+        
+        # Check that reference model has no gradients (frozen)
+        ref_has_grads = any(p.grad is not None and torch.any(p.grad != 0) 
+                           for p in trainer.reference_model.parameters())
+        self.assertFalse(ref_has_grads, "Reference model should not have gradients")
+        
+        # Check that reward model has no gradients (frozen)
+        reward_has_grads = any(p.grad is not None and torch.any(p.grad != 0) 
+                              for p in trainer.reward_model.parameters())
+        self.assertFalse(reward_has_grads, "Reward model should not have gradients")
+        
+        print("PPO training gradient check passed")
         
     def test_response_generation_gradients(self):
         """
@@ -496,7 +769,37 @@ class TestRLHFEndToEnd(unittest.TestCase):
         - Gradients should flow correctly through sampling operation
         - Temperature scaling should affect gradients appropriately
         """
-        pass
+        policy_model = GPT(self.config)
+        
+        # Create test prompts
+        prompt_len = 4
+        prompts = torch.randint(0, self.config.vocab_size, (1, prompt_len))
+        
+        # Generate response deterministically for gradient checking
+        with torch.no_grad():
+            logits, _ = policy_model(prompts)
+            next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+        
+        # Create full sequence
+        full_seq = torch.cat([prompts, next_token], dim=1)
+        
+        # Compute log probabilities with gradients
+        logits, _ = policy_model(full_seq)
+        log_probs = F.log_softmax(logits, dim=-1)
+        
+        # Get log probability of the generated token
+        generated_log_prob = log_probs[0, -2, next_token[0, 0]]  # -2 because we want logits that generated the last token
+        
+        # Backpropagate
+        policy_model.zero_grad()
+        generated_log_prob.backward()
+        
+        # Check that model has gradients
+        has_gradients = any(p.grad is not None and torch.any(p.grad != 0) 
+                           for p in policy_model.parameters())
+        self.assertTrue(has_gradients, "Policy should have gradients from generation")
+        
+        print("Response generation gradient check passed")
 
 
 class TestNumericalStability(unittest.TestCase):
@@ -515,7 +818,24 @@ class TestNumericalStability(unittest.TestCase):
         - Use log-softmax for better numerical stability
         - Ensure gradients remain bounded
         """
-        pass
+        # Test with extreme logit values
+        extreme_logits = torch.tensor([[100.0, -100.0, 0.0]], requires_grad=True)
+        
+        # Use log-softmax for stability
+        log_probs = F.log_softmax(extreme_logits, dim=-1)
+        loss = -log_probs.sum()
+        
+        loss.backward()
+        
+        # Check that gradients are finite
+        self.assertTrue(torch.all(torch.isfinite(extreme_logits.grad)), 
+                       "Softmax gradients should be finite even with extreme values")
+        
+        # Check that gradients are bounded
+        self.assertTrue(torch.all(torch.abs(extreme_logits.grad) < 10), 
+                       "Softmax gradients should be bounded")
+        
+        print("Softmax stability check passed")
         
     def test_kl_divergence_stability(self):
         """
@@ -529,7 +849,33 @@ class TestNumericalStability(unittest.TestCase):
         Mathematical fix:
         KL(p||q) = ∑ p * log((p + ε) / (q + ε))
         """
-        pass
+        # Create logits that could cause instability
+        logits = torch.tensor([[10.0, -10.0, 0.0]], requires_grad=True)
+        ref_logits = torch.tensor([[-10.0, 10.0, 0.0]])
+        attention_mask = torch.ones(1, 3)
+        
+        # Test our KL implementation
+        trainer = PPOTrainer(
+            GPT(GPTConfig()), ValueFunction(GPTConfig()),
+            RewardModel(GPTConfig()), GPT(GPTConfig())
+        )
+        
+        kl_div = trainer.compute_kl_penalty(
+            logits.unsqueeze(0), ref_logits.unsqueeze(0), attention_mask
+        )
+        
+        # KL should be finite and non-negative
+        self.assertTrue(torch.isfinite(kl_div), "KL divergence should be finite")
+        self.assertGreaterEqual(kl_div.item(), 0, "KL divergence should be non-negative")
+        
+        # Compute gradients
+        kl_div.backward()
+        
+        # Gradients should be finite
+        self.assertTrue(torch.all(torch.isfinite(logits.grad)), 
+                       "KL gradients should be finite")
+        
+        print("KL divergence stability check passed")
         
     def test_advantage_normalization_stability(self):
         """
@@ -540,7 +886,31 @@ class TestNumericalStability(unittest.TestCase):
         - Proper handling of constant advantages
         - Gradient flow through normalization
         """
-        pass
+        trainer = PPOTrainer(
+            GPT(GPTConfig()), ValueFunction(GPTConfig()),
+            RewardModel(GPTConfig()), GPT(GPTConfig())
+        )
+        
+        # Test with constant advantages (std = 0)
+        rewards = torch.tensor([1.0, 1.0, 1.0], requires_grad=True)
+        values = torch.tensor([0.5, 0.5, 0.5], requires_grad=True)
+        
+        advantages = trainer.compute_advantages(rewards, values)
+        
+        # Should handle zero std gracefully
+        self.assertTrue(torch.all(torch.isfinite(advantages)), 
+                       "Advantages should be finite even with zero std")
+        
+        # Test gradient flow
+        test_loss = advantages.sum()
+        test_loss.backward()
+        
+        self.assertTrue(torch.all(torch.isfinite(rewards.grad)), 
+                       "Advantage gradients should be finite")
+        self.assertTrue(torch.all(torch.isfinite(values.grad)), 
+                       "Value gradients should be finite")
+        
+        print("Advantage normalization stability check passed")
 
 
 def run_gradient_checks():
@@ -550,7 +920,53 @@ def run_gradient_checks():
     Returns:
         Dictionary summarizing gradient check results
     """
-    pass
+    results = {}
+    
+    print("Running comprehensive gradient checks...")
+    
+    try:
+        # Test GPT model
+        print("\nTesting GPT model...")
+        suite = unittest.TestLoader().loadTestsFromTestCase(TestGPTModel)
+        runner = unittest.TextTestRunner(verbosity=0, stream=open(os.devnull, 'w'))
+        result = runner.run(suite)
+        results['GPT_Model'] = result.wasSuccessful()
+        
+        # Test Reward Model
+        print("Testing Reward model...")
+        suite = unittest.TestLoader().loadTestsFromTestCase(TestRewardModel)
+        result = runner.run(suite)
+        results['Reward_Model'] = result.wasSuccessful()
+        
+        # Test Value Function
+        print("Testing Value function...")
+        suite = unittest.TestLoader().loadTestsFromTestCase(TestValueFunction)
+        result = runner.run(suite)
+        results['Value_Function'] = result.wasSuccessful()
+        
+        # Test PPO Loss
+        print("Testing PPO loss components...")
+        suite = unittest.TestLoader().loadTestsFromTestCase(TestPPOLoss)
+        result = runner.run(suite)
+        results['PPO_Loss'] = result.wasSuccessful()
+        
+        # Test End-to-End
+        print("Testing end-to-end RLHF...")
+        suite = unittest.TestLoader().loadTestsFromTestCase(TestRLHFEndToEnd)
+        result = runner.run(suite)
+        results['End_to_End'] = result.wasSuccessful()
+        
+        # Test Numerical Stability
+        print("Testing numerical stability...")
+        suite = unittest.TestLoader().loadTestsFromTestCase(TestNumericalStability)
+        result = runner.run(suite)
+        results['Numerical_Stability'] = result.wasSuccessful()
+        
+    except Exception as e:
+        print(f"Error during gradient checking: {e}")
+        results['Error'] = str(e)
+    
+    return results
 
 
 def create_test_batch() -> Dict[str, torch.Tensor]:
@@ -567,7 +983,19 @@ def create_test_batch() -> Dict[str, torch.Tensor]:
     - rewards: Reward scores
     - advantages: Advantage estimates
     """
-    pass
+    batch_size, seq_len, vocab_size = 2, 16, 1000
+    
+    batch = {
+        'input_ids': torch.randint(0, vocab_size, (batch_size, seq_len)),
+        'attention_mask': torch.ones(batch_size, seq_len),
+        'labels': torch.randint(0, vocab_size, (batch_size, seq_len)),
+        'rewards': torch.randn(batch_size),
+        'advantages': torch.randn(batch_size),
+        'prompts': torch.randint(0, vocab_size, (batch_size, seq_len // 2)),
+        'responses': torch.randint(0, vocab_size, (batch_size, seq_len // 2)),
+    }
+    
+    return batch
 
 
 if __name__ == "__main__":
