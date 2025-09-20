@@ -1,9 +1,10 @@
-import argparse
 import math
 import os
+from typing import Optional
 
 import torch
-from torch.utils.data import DataLoader, DistributedSampler
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
 
 from data import SupervisedDataset, collate_supervised, build_tokenizer
 from gpt import GPT, GPTConfig
@@ -16,93 +17,111 @@ def cosine_schedule(step: int, total_steps: int, base_lr: float, warmup: int) ->
     return 0.5 * base_lr * (1.0 + math.cos(math.pi * progress))
 
 
-def setup_distributed() -> tuple[int, int, int | None]:
-    if "RANK" not in os.environ:
-        return 0, 1, None
-    torch.distributed.init_process_group("nccl")
-    rank = torch.distributed.get_rank()
-    world = torch.distributed.get_world_size()
-    local = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local)
-    return rank, world, local
+def supervised_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Compute the masked language modeling loss used for SFT training."""
+
+    log_probs = F.log_softmax(logits, dim=-1)
+    loss = F.nll_loss(
+        log_probs.transpose(1, 2),
+        targets,
+        reduction="none",
+        ignore_index=-1,
+    )
+    mask = mask.to(log_probs.dtype)
+    denom = mask.sum().clamp(min=1.0)
+    return (loss * mask).sum() / denom
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("data", type=str)
-    parser.add_argument("--out", type=str, default="weights")
-    parser.add_argument("--batch", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=5e-5)
-    parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--accum", type=int, default=1)
-    parser.add_argument("--warmup", type=int, default=100)
-    parser.add_argument("--init", type=str, default=None)
-    parser.add_argument("--dropout", type=float, default=0.0)
-    args = parser.parse_args()
+def train_sft(
+    data_path: str,
+    *,
+    out_dir: str = "weights",
+    batch_size: int = 4,
+    lr: float = 5e-5,
+    epochs: int = 1,
+    accum: int = 1,
+    warmup: int = 100,
+    init_path: Optional[str] = None,
+    dropout: float = 0.0,
+    device: Optional[torch.device] = None,
+) -> None:
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    rank, world, local_rank = setup_distributed()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if torch.cuda.is_available() and local_rank is not None:
-        device = torch.device("cuda", local_rank)
-
-    config = GPTConfig(dropout=args.dropout)
+    config = GPTConfig(dropout=dropout)
     model = GPT(config).to(device)
 
-    if args.init:
-        state = torch.load(args.init, map_location="cpu")
+    if init_path:
+        state = torch.load(init_path, map_location="cpu")
         model.load_state_dict(state, strict=False)
 
-    if world > 1:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[local_rank] if local_rank is not None else None
-        )
-
-    dataset = SupervisedDataset(args.data, block_size=config.block_size)
+    dataset = SupervisedDataset(data_path, block_size=config.block_size)
     bundle = build_tokenizer()
-    sampler = (
-        DistributedSampler(dataset, shuffle=True) if world > 1 else None
-    )
     loader = DataLoader(
         dataset,
-        batch_size=args.batch,
-        sampler=sampler,
-        shuffle=sampler is None,
+        batch_size=batch_size,
+        shuffle=True,
         collate_fn=lambda batch: collate_supervised(batch, bundle.pad),
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
 
-    total_steps = args.epochs * math.ceil(len(loader) / args.accum)
+    total_steps = epochs * math.ceil(len(loader) / accum)
     step = 0
 
     model.train()
-    for epoch in range(args.epochs):
-        if sampler is not None:
-            sampler.set_epoch(epoch)
+    for epoch in range(epochs):
         for batch in loader:
             inputs = batch["input_ids"].to(device)
             targets = batch["target_ids"].to(device)
-            mask = batch["attention_mask"].to(device)
+            mask = batch["attention_mask"].to(device).to(inputs.dtype)
 
-            logits, loss = model(inputs, targets=targets, attention_mask=mask)
-            loss = loss / args.accum
+            logits, _ = model(inputs, attention_mask=mask)
+            loss = supervised_loss(logits, targets, mask) / accum
             loss.backward()
 
-            if (step + 1) % args.accum == 0:
-                lr = cosine_schedule(step // args.accum, total_steps, args.lr, args.warmup)
+            if (step + 1) % accum == 0:
+                lr_now = cosine_schedule(step // accum, total_steps, lr, warmup)
                 for g in optimizer.param_groups:
-                    g["lr"] = lr
+                    g["lr"] = lr_now
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
             step += 1
 
-        if rank == 0:
-            os.makedirs(args.out, exist_ok=True)
-            fname = os.path.join(args.out, f"sft_epoch_{epoch+1}.pt")
-            state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
-            torch.save(state, fname)
+        os.makedirs(out_dir, exist_ok=True)
+        fname = os.path.join(out_dir, f"sft_epoch_{epoch+1}.pt")
+        torch.save(model.state_dict(), fname)
 
 
 if __name__ == "__main__":
-    main()
+    DATA_PATH = "data/sft_train.jsonl"
+    OUT_DIR = "weights"
+    BATCH_SIZE = 4
+    LEARNING_RATE = 5e-5
+    EPOCHS = 1
+    ACCUM = 1
+    WARMUP = 100
+    INIT_PATH = None
+    DROPOUT = 0.0
+
+    if not os.path.exists(DATA_PATH):
+        raise FileNotFoundError(
+            f"Supervised data not found at {DATA_PATH}. Update the path before running."
+        )
+
+    train_sft(
+        DATA_PATH,
+        out_dir=OUT_DIR,
+        batch_size=BATCH_SIZE,
+        lr=LEARNING_RATE,
+        epochs=EPOCHS,
+        accum=ACCUM,
+        warmup=WARMUP,
+        init_path=INIT_PATH,
+        dropout=DROPOUT,
+    )
