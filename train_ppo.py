@@ -181,12 +181,19 @@ def _prepare_sample_batch(
     responses: list[torch.Tensor] = []
     full_sequences: list[torch.Tensor] = []
     response_lengths: list[int] = []
+    block_size = trainer.policy.config.block_size
     for prompt, length in zip(prompt_list, prompt_lengths):
-        generated = trainer.policy.generate(
-            prompt.unsqueeze(0).to(device), max_new_tokens, eos_token=eos_token
-        )
-        full = generated[0].detach().cpu()
-        response = full[length:]
+        headroom = max(block_size - length, 0)
+        allowed_new_tokens = min(max_new_tokens, headroom)
+        if allowed_new_tokens <= 0:
+            full = prompt.clone()
+            response = prompt.new_empty((0,), dtype=torch.long)
+        else:
+            generated = trainer.policy.generate(
+                prompt.unsqueeze(0).to(device), allowed_new_tokens, eos_token=eos_token
+            )
+            full = generated[0].detach().cpu()
+            response = full[length:]
         full_sequences.append(full)
         responses.append(response)
         response_lengths.append(response.size(0))
