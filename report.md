@@ -69,5 +69,3 @@ For a beginner, the takeaway is that RLHF with PPO is like training the model wi
 ## References
 
 The concepts and process described here are based on the InstructGPT paper by OpenAI, explanations from blogs and articles on RLHF, and the original PPO research. The combination of human feedback and PPO has proven to be a powerful approach in aligning large language models with our objectives, as evidenced by the improved performance and preference for models like InstructGPT/ChatGPT over their purely supervised predecessors.
-
-Can you make a coding assignment out of that. Write the skeleton code for me at an atomic level. Goal is full blown working implementation of ppo rlhf on gpt 2 small where PyTorch is the only library. Write out the functions I have to implement and write gradient check unit tests. Leave the functions blank except for doc string comments telling me what I need to implement mathematically
