@@ -51,6 +51,9 @@ def train_sft(
     dropout: float = 0.0,
     device: Optional[torch.device] = None,
 ) -> None:
+    if epochs < 1:
+        raise ValueError("epochs must be >= 1")
+
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -155,34 +158,43 @@ def train_sft(
         os.makedirs(out_dir, exist_ok=True)
         fname = os.path.join(out_dir, f"sft_epoch_{epoch+1}.pt")
         torch.save(model.state_dict(), fname)
+        return fname
     finally:
         logger.close()
 
 
-if __name__ == "__main__":
-    DATA_PATH = "data/sft_train.jsonl"
-    OUT_DIR = "weights"
-    BATCH_SIZE = 4
-    LEARNING_RATE = 5e-5
-    EPOCHS = 1
-    ACCUM = 1
-    WARMUP = 100
-    INIT_PATH = None
-    DROPOUT = 0.0
+def main() -> None:
+    # Edit the values below to suit your setup before launching the script.
+    data_path = "data/hh_rlhf_sft_train.jsonl"
+    out_dir = "weights"
+    batch_size = 4
+    lr = 5e-5
+    epochs = 1
+    accum = 1
+    warmup = 100
+    init_path = None
+    dropout = 0.0
+    device_spec = None  # e.g. "cuda" or "cpu"; defaults to CUDA when available
 
-    if not os.path.exists(DATA_PATH):
+    if not os.path.exists(data_path):
         raise FileNotFoundError(
-            f"Supervised data not found at {DATA_PATH}. Update the path before running."
+            f"Supervised data not found at {data_path}. Prepare the JSONL file before training."
         )
 
+    device = torch.device(device_spec) if device_spec else None
     train_sft(
-        DATA_PATH,
-        out_dir=OUT_DIR,
-        batch_size=BATCH_SIZE,
-        lr=LEARNING_RATE,
-        epochs=EPOCHS,
-        accum=ACCUM,
-        warmup=WARMUP,
-        init_path=INIT_PATH,
-        dropout=DROPOUT,
+        data_path,
+        out_dir=out_dir,
+        batch_size=batch_size,
+        lr=lr,
+        epochs=epochs,
+        accum=accum,
+        warmup=warmup,
+        init_path=init_path,
+        dropout=dropout,
+        device=device,
     )
+
+
+if __name__ == "__main__":
+    main()

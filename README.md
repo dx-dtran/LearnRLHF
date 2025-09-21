@@ -38,57 +38,79 @@ The table below estimates the memory required to train members of the GPT-2 fami
 
 With careful configuration (batch sizes of 1–2, sequence lengths ≤1024, activation checkpointing, and mixed precision), GPT-2 XL is typically the largest GPT-2 variant that fits within 24 GB while leaving a couple of gigabytes for activations and CUDA overhead. Larger effective batch sizes can be achieved with gradient accumulation.
 
-## Supervised fine-tuning
+## Preparing the Anthropic HH dataset
 
-`train_sft.py` now exposes a `train_sft` function and uses simple module-level constants instead of `argparse`.
+Both the supervised and reward-model trainers expect JSONL files derived from the
+[`Anthropic/hh-rlhf`](https://huggingface.co/datasets/Anthropic/hh-rlhf)
+dataset. Each record supplied to the trainers follows one of the two minimal
+schemas below:
 
-```python
-from train_sft import train_sft
+```json
+// Supervised fine-tuning (SFT)
+{"prompt": "<conversation history>", "chosen": "<assistant reply>"}
 
-train_sft(
-    "data/sft_train.jsonl",
-    out_dir="weights",
-    batch_size=4,
-    lr=5e-5,
-    epochs=1,
-    accum=1,
-    warmup=100,
-    init_path=None,
-    dropout=0.0,
-)
+// Reward modelling (RM)
+{"prompt": "<conversation history>", "chosen": "<preferred reply>", "rejected": "<dispreferred reply>"}
 ```
 
-Running `python train_sft.py` will execute the same routine using the constants defined under the `if __name__ == "__main__"` guard—update them before launching training.
+You can export these files with the `datasets` library:
+
+```bash
+pip install datasets  # if you do not already have it
+
+python - <<'PY'
+from datasets import load_dataset
+
+dataset = load_dataset("Anthropic/hh-rlhf", split="train")
+
+# SFT: only the preferred continuations are required
+sft = dataset.remove_columns([c for c in dataset.column_names if c not in {"prompt", "chosen"}])
+sft.to_json("data/hh_rlhf_sft_train.jsonl")
+
+# RM: keep both chosen and rejected responses
+rm = dataset.remove_columns([c for c in dataset.column_names if c not in {"prompt", "chosen", "rejected"}])
+rm.to_json("data/hh_rlhf_preferences_train.jsonl")
+PY
+```
+
+Both trainers default to the file names shown above. You can adjust the paths by
+editing the configuration variables inside `train_sft.py` and `train_rm.py`.
+
+## Supervised fine-tuning
+
+Edit the configuration block at the bottom of `train_sft.py` to point to your
+SFT JSONL file, tweak the batch size or learning rate, and then launch training
+with:
+
+```bash
+python train_sft.py
+```
+
+The defaults mirror a minimal run on the Anthropic HH SFT split. Set
+`device_spec` to "cuda" or "cpu" if you need to force device selection, and
+adjust `accum` to enable gradient accumulation when memory is limited.
+
+## Reward model fitting
+
+Similarly, edit the configuration block at the end of `train_rm.py` to select
+your preference JSONL file, output path, and other hyperparameters, then run:
+
+```bash
+python train_rm.py
+```
+
+The reward-model script shares the same configuration style, including support
+for reusing an SFT checkpoint via `init_path` and switching devices with
+`device_spec`.
 
 ## PPO-based RLHF
 
-`train_ppo.py` provides a `train_ppo` function configured in the same style. You can either import and call it directly:
+`train_ppo.py` provides a `train_ppo` function configured in the same style. You
+can either import and call it directly or edit the constants at the bottom of
+`train_ppo.py` and run `python train_ppo.py`.
 
-```python
-from train_ppo import train_ppo
-
-train_ppo(
-    "data/preferences_train.jsonl",
-    sft_path="weights/sft_epoch_1.pt",
-    out_dir="ppo_weights",
-    dropout=0.0,
-    rm_batch=4,
-    rm_epochs=1,
-    rm_lr=1e-5,
-    ppo_batch=4,
-    ppo_epochs=1,
-    ppo_steps=4,
-    max_new=64,
-    ppo_lr=1e-5,
-    clip=0.2,
-    kl_coef=0.1,
-    entropy_coef=0.01,
-)
-```
-
-or edit the constants at the bottom of `train_ppo.py` and run `python train_ppo.py`.
-
-Both training scripts now assume single-GPU execution. Gradient accumulation is available through the `accum` (SFT) and `ppo_steps` parameters.
+Both training scripts now assume single-GPU execution. Gradient accumulation is
+available through the `accum` (SFT) and `ppo_steps` parameters.
 
 ## Testing
 
