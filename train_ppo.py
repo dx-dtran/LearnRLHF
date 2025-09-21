@@ -19,7 +19,7 @@ class ScalarHead(nn.Module):
 
     def forward(self, tokens: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         hidden = self.body.transform(tokens, attention_mask=mask)
-        lengths = mask.sum(dim=1) - 1
+        lengths = mask.sum(dim=1).long() - 1
         last = hidden[torch.arange(hidden.size(0)), lengths.clamp(min=0)]
         return self.score(last).squeeze(-1)
 
