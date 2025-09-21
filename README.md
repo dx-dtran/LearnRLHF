@@ -26,7 +26,7 @@ The “model_state” term corresponds to the parameter + optimizer memory for o
 | GPT-2 XL     | 1.558 B    | ≈17.4 GB                 | ~20–21 GB     | ~37–38 GB               |
 
 Because PPO must hold both the current policy and a frozen reference copy in memory, GPT-2 Large is usually the practical ceiling on a single RTX 4090 without offloading or tensor parallelism. GPT-2 XL can be trained for SFT/RM but will exceed device memory once PPO requires two copies of the model. Techniques such as parameter-efficient adapters, ZeRO optimizer sharding, or CPU offload can push beyond these limits, but they are outside the scope of this compact reference implementation.
-=======
+
 The table below estimates the memory required to train members of the GPT-2 family on a single NVIDIA RTX 4090 (24 GB). Parameter memory assumes mixed-precision training with AdamW, which typically stores weights, gradients, and two FP32 optimizer moments (~12 bytes per parameter). An additional 2–4 GB is usually needed for activations, temporary buffers, and dataloader queues.
 
 | Model        | Parameters | AdamW state (≈12 B/param) | Estimated total VRAM need |
