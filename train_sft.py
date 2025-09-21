@@ -39,6 +39,7 @@ def train_sft(
     batch_size: int = 4,
     lr: float = 5e-5,
     epochs: int = 1,
+    grad_accumulation_steps: int = 1,
     init_path: Optional[str] = None,
     device: Optional[torch.device] = None,
 ) -> str:
@@ -68,7 +69,12 @@ def train_sft(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
 
+    if grad_accumulation_steps < 1:
+        raise ValueError("grad_accumulation_steps must be a positive integer")
+
     for _ in range(epochs):
+        optimizer.zero_grad()
+        step_in_epoch = 0
         for batch in loader:
             tokens = batch["input_ids"].to(device)
             targets = batch["target_ids"].to(device)
@@ -77,10 +83,23 @@ def train_sft(
             logits, _ = model(tokens, attention_mask=mask)
             loss = supervised_loss(logits, targets, mask)
 
-            optimizer.zero_grad()
-            loss.backward()
+            (loss / grad_accumulation_steps).backward()
+            step_in_epoch += 1
+
+            if step_in_epoch % grad_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+
+        remainder = step_in_epoch % grad_accumulation_steps
+        if remainder != 0:
+            scale = grad_accumulation_steps / remainder
+            for param in model.parameters():
+                if param.grad is not None:
+                    param.grad.mul_(scale)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            optimizer.zero_grad()
 
     os.makedirs(out_dir, exist_ok=True)
     output_path = os.path.join(out_dir, "sft.pt")
@@ -95,6 +114,7 @@ def main() -> None:
     lr = 5e-5
     epochs = 1
     init_path = None
+    grad_accumulation_steps = 1
     device = None
 
     device_obj = torch.device(device) if device else None
@@ -104,6 +124,7 @@ def main() -> None:
         batch_size=batch_size,
         lr=lr,
         epochs=epochs,
+        grad_accumulation_steps=grad_accumulation_steps,
         init_path=init_path,
         device=device_obj,
     )

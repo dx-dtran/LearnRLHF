@@ -36,6 +36,7 @@ def train_reward_model(
     epochs: int = 1,
     lr: float = 1e-5,
     dropout: float = 0.0,
+    grad_accumulation_steps: int = 1,
     init_path: Optional[str] = None,
     device: Optional[torch.device] = None,
 ) -> str:
@@ -66,7 +67,12 @@ def train_reward_model(
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
 
+    if grad_accumulation_steps < 1:
+        raise ValueError("grad_accumulation_steps must be a positive integer")
+
     for _ in range(epochs):
+        optimizer.zero_grad()
+        step_in_epoch = 0
         for batch in loader:
             chosen = batch["chosen"].to(device)
             chosen_mask = batch["chosen_mask"].to(device)
@@ -77,10 +83,23 @@ def train_reward_model(
             rejected_scores = model(rejected, rejected_mask)
             loss = preference_loss(chosen_scores, rejected_scores)
 
-            optimizer.zero_grad()
-            loss.backward()
+            (loss / grad_accumulation_steps).backward()
+            step_in_epoch += 1
+
+            if step_in_epoch % grad_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+
+        remainder = step_in_epoch % grad_accumulation_steps
+        if remainder != 0:
+            scale = grad_accumulation_steps / remainder
+            for param in model.parameters():
+                if param.grad is not None:
+                    param.grad.mul_(scale)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            optimizer.zero_grad()
 
     if os.path.dirname(out_path):
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -96,6 +115,7 @@ def main() -> None:
     lr = 1e-5
     dropout = 0.0
     init_path = None
+    grad_accumulation_steps = 1
     device = None
 
     device_obj = torch.device(device) if device else None
@@ -106,6 +126,7 @@ def main() -> None:
         epochs=epochs,
         lr=lr,
         dropout=dropout,
+        grad_accumulation_steps=grad_accumulation_steps,
         init_path=init_path,
         device=device_obj,
     )
