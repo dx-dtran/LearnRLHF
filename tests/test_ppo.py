@@ -2,6 +2,7 @@ import os
 import sys
 
 import torch
+import types
 import torch.nn.functional as F
 from torch.autograd import gradcheck
 
@@ -10,7 +11,7 @@ sys.path.append(ROOT)
 
 from gpt import GPTConfig, GPT
 from train_rm import ScalarHead
-from train_ppo import PPOTrainer, gather_log_probs
+from train_ppo import PPOTrainer, _prepare_sample_batch, gather_log_probs
 from train_ppo import train_ppo  # noqa: F401  # ensure module imports without argparse
 
 
@@ -110,3 +111,40 @@ def test_ppo_policy_loss_gradcheck():
         return policy_loss + trainer.kl * kl - trainer.entropy * entropy
 
     assert gradcheck(objective, (log_probs,), eps=1e-6, atol=1e-4, rtol=1e-4)
+
+
+def test_prepare_sample_batch_stops_after_eos():
+    config, policy, reference, value, reward = build_models()
+    trainer = PPOTrainer(policy, reference, value, reward, pad_token=0, lr=1e-4)
+
+    pad_token = 0
+    eos_token = 1
+
+    def fake_generate(self, tokens, max_new_tokens, eos_token=None):
+        assert eos_token == 1
+        generated = tokens
+        for next_token in [torch.tensor([[5]]), torch.tensor([[1]]), torch.tensor([[7]])]:
+            generated = torch.cat([generated, next_token.to(tokens.device)], dim=1)
+            if eos_token is not None and next_token.item() == eos_token:
+                break
+        return generated
+
+    policy.generate = types.MethodType(fake_generate, policy)
+
+    prompts = torch.tensor([[2, 3]])
+    prompt_mask = torch.ones_like(prompts)
+
+    sample = _prepare_sample_batch(
+        prompts,
+        prompt_mask,
+        trainer,
+        max_new_tokens=3,
+        pad_token=pad_token,
+        eos_token=eos_token,
+    )
+
+    assert sample["full"].shape[1] == prompts.shape[1] + 2
+    assert sample["full"][0, -1].item() == eos_token
+    assert sample["responses"].shape[1] == 2
+    assert sample["responses"][0, -1].item() == eos_token
+    assert sample["response_lengths"].item() == 2
