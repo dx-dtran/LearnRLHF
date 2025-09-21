@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -27,7 +28,12 @@ class CausalSelfAttention(nn.Module):
         self.qkv = nn.Linear(config.n_embd, 3 * config.n_embd, bias=False)
         self.proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        query_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         b, t, c = x.shape
         qkv = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
@@ -37,9 +43,26 @@ class CausalSelfAttention(nn.Module):
         v = v.view(b, t, self.n_head, self.head_dim).transpose(1, 2)
 
         att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        att = att.masked_fill(~mask, float("-inf"))
+        no_valid_keys: Optional[torch.Tensor] = None
+        if mask is not None:
+            att = att.masked_fill(~mask, float("-inf"))
+            no_valid_keys = ~mask.any(dim=-1, keepdim=True)
+            att = torch.where(no_valid_keys, torch.zeros_like(att), att)
+
         att = torch.softmax(att, dim=-1)
+
+        if query_mask is not None:
+            query_mask_float = query_mask.to(dtype=att.dtype)
+            att = att * query_mask_float
+        else:
+            query_mask_float = None
+
         out = att @ v
+
+        if query_mask_float is not None:
+            out = out * query_mask_float
+        if no_valid_keys is not None:
+            out = out.masked_fill(no_valid_keys, 0.0)
 
         out = out.transpose(1, 2).contiguous().view(b, t, c)
         return self.proj(out)
@@ -57,8 +80,13 @@ class TransformerBlock(nn.Module):
             nn.Linear(4 * config.n_embd, config.n_embd, bias=False),
         )
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x), mask)
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        query_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        x = x + self.attn(self.ln1(x), mask, query_mask)
         x = x + self.ff(self.ln2(x))
         return x
 
@@ -76,16 +104,16 @@ class GPT(nn.Module):
 
     def _build_mask(
         self, attention_mask: torch.Tensor | None, length: int, device: torch.device
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         causal = torch.tril(torch.ones(length, length, device=device, dtype=torch.bool))
         causal = causal.view(1, 1, length, length)
         if attention_mask is None:
-            return causal
+            return causal, None
         attn = attention_mask.to(device=device, dtype=torch.bool)
-        attn = attn[:, None, None, :]
-        query_mask = attention_mask.to(device=device, dtype=torch.bool)[:, None, :, None]
-        full_mask = causal & attn & query_mask
-        return full_mask
+        key_mask = attn[:, None, None, :]
+        query_mask = attn[:, None, :, None]
+        full_mask = causal & key_mask
+        return full_mask, query_mask
 
     def transform(self, tokens: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
         b, t = tokens.shape
@@ -93,9 +121,9 @@ class GPT(nn.Module):
             raise ValueError("input sequence is longer than block_size")
         pos = torch.arange(t, device=tokens.device)
         x = self.token_embed(tokens) + self.position_embed(pos)[None, :, :]
-        mask = self._build_mask(attention_mask, t, tokens.device)
+        mask, query_mask = self._build_mask(attention_mask, t, tokens.device)
         for block in self.blocks:
-            x = block(x, mask)
+            x = block(x, mask, query_mask)
         return self.ln(x)
 
     def forward(
