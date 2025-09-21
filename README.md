@@ -4,6 +4,29 @@ This repository contains a compact reference implementation of supervised fine-t
 
 ## Hardware guidance
 
+The RLHF workflow in this repository has three GPU-intensive stages: supervised fine-tuning (SFT) of the base policy, reward-model (RM) fitting, and PPO training of the aligned policy. The tables below summarize typical memory footprints on a single NVIDIA RTX 4090 (24 GB) when using mixed precision and AdamW (weights + gradients + 2 FP32 moments ≈12 bytes/parameter). These numbers assume sequence lengths ≤1024, batch sizes of 1–2 per optimizer step, fused kernels disabled, and 2–3 GB of headroom for activations, temporary buffers, and dataloader queues. Activation checkpointing or gradient accumulation can stretch the limits further if needed.
+
+### Stage-by-stage VRAM usage
+
+| Stage        | Components resident in memory | Approximate VRAM need |
+|--------------|--------------------------------|-----------------------|
+| SFT          | Policy model + optimizer state | `model_state + 3–4 GB` |
+| RM training  | Reward model + optimizer state | `model_state + 3–4 GB` |
+| PPO          | Policy + reference model, value head, optimizer state, rollout buffers | `2 × model_state + 5–6 GB` |
+
+The “model_state” term corresponds to the parameter + optimizer memory for one GPT-2 checkpoint in the tables below.
+
+### GPT-2 memory estimates
+
+| Model        | Parameters | AdamW state (≈12 B/param) | SFT / RM VRAM | PPO VRAM (policy + ref) |
+|--------------|------------|---------------------------|---------------|-------------------------|
+| GPT-2        | 124 M      | ≈1.4 GB                  | ~4–5 GB       | ~8–9 GB                 |
+| GPT-2 Medium | 355 M      | ≈4.0 GB                  | ~7–8 GB       | ~15–16 GB               |
+| GPT-2 Large  | 774 M      | ≈8.7 GB                  | ~12–13 GB     | ~23–24 GB               |
+| GPT-2 XL     | 1.558 B    | ≈17.4 GB                 | ~20–21 GB     | ~37–38 GB               |
+
+Because PPO must hold both the current policy and a frozen reference copy in memory, GPT-2 Large is usually the practical ceiling on a single RTX 4090 without offloading or tensor parallelism. GPT-2 XL can be trained for SFT/RM but will exceed device memory once PPO requires two copies of the model. Techniques such as parameter-efficient adapters, ZeRO optimizer sharding, or CPU offload can push beyond these limits, but they are outside the scope of this compact reference implementation.
+
 The table below estimates the memory required to train members of the GPT-2 family on a single NVIDIA RTX 4090 (24 GB). Parameter memory assumes mixed-precision training with AdamW, which typically stores weights, gradients, and two FP32 optimizer moments (~12 bytes per parameter). An additional 2–4 GB is usually needed for activations, temporary buffers, and dataloader queues.
 
 | Model        | Parameters | AdamW state (≈12 B/param) | Estimated total VRAM need |
