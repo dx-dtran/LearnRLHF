@@ -173,20 +173,47 @@ def _prepare_sample_batch(
 ) -> dict[str, torch.Tensor]:
     device = prompts.device
     pad = trainer.pad
+    block_size = trainer.policy.config.block_size
 
-    prompt_lengths = prompt_mask.sum(dim=1).long().tolist()
-    prompt_list = [prompts[i, : length].cpu() for i, length in enumerate(prompt_lengths)]
+    prompt_lengths_all = prompt_mask.sum(dim=1).long().tolist()
 
     responses: list[torch.Tensor] = []
     full_sequences: list[torch.Tensor] = []
     response_lengths: list[int] = []
-    for prompt, length in zip(prompt_list, prompt_lengths):
-        generated = trainer.policy.generate(prompt.unsqueeze(0).to(device), max_new_tokens, eos_token=pad)
+    prompt_lengths: list[int] = []
+    for i, length in enumerate(prompt_lengths_all):
+        remaining = block_size - length
+        if remaining <= 0:
+            continue
+
+        prompt = prompts[i, :length].unsqueeze(0).to(device)
+        generation_limit = min(max_new_tokens, remaining)
+        generated = trainer.policy.generate(prompt, generation_limit, eos_token=pad)
         full = generated[0].detach().cpu()
         response = full[length:]
+
+        prompt_lengths.append(length)
         full_sequences.append(full)
         responses.append(response)
         response_lengths.append(response.size(0))
+
+    if not full_sequences:
+        empty_tokens = torch.zeros((0, 0), dtype=torch.long, device=device)
+        empty_mask = torch.zeros((0, 0), dtype=torch.float32, device=device)
+        empty_lengths = torch.zeros((0,), dtype=torch.long, device=device)
+        empty_log_probs = torch.zeros((0, 0), dtype=torch.float32, device=device)
+        empty_values = torch.zeros((0,), dtype=torch.float32, device=device)
+        return {
+            "full": empty_tokens,
+            "full_mask": empty_mask,
+            "responses": empty_tokens.clone(),
+            "responses_mask": empty_mask.clone(),
+            "prompt_lengths": empty_lengths,
+            "response_lengths": empty_lengths.clone(),
+            "old_log_probs": empty_log_probs,
+            "old_values": empty_values,
+            "response_mask": empty_mask.clone(),
+        }
 
     full_tokens, full_mask = _pad_batch(full_sequences, pad)
     responses_tokens, responses_mask = _pad_batch(responses, pad)
@@ -310,6 +337,8 @@ def train_ppo(
             prompt_mask = prompt_mask.to(device)
 
             sample = _prepare_sample_batch(prompt_tokens, prompt_mask, trainer, max_new_tokens)
+            if sample["full"].size(0) == 0:
+                continue
             with torch.no_grad():
                 rewards = reward_model(sample["full"], sample["full_mask"])
             advantages = rewards - sample["old_values"]

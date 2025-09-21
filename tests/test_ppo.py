@@ -10,7 +10,7 @@ sys.path.append(ROOT)
 
 from gpt import GPTConfig, GPT
 from train_rm import ScalarHead
-from train_ppo import PPOTrainer, gather_log_probs
+from train_ppo import PPOTrainer, _prepare_sample_batch, gather_log_probs
 from train_ppo import train_ppo  # noqa: F401  # ensure module imports without argparse
 
 
@@ -110,3 +110,27 @@ def test_ppo_policy_loss_gradcheck():
         return policy_loss + trainer.kl * kl - trainer.entropy * entropy
 
     assert gradcheck(objective, (log_probs,), eps=1e-6, atol=1e-4, rtol=1e-4)
+
+
+def test_prepare_sample_batch_caps_generation_to_block_size():
+    torch.manual_seed(0)
+    config, policy, reference, value, reward = build_models()
+    trainer = PPOTrainer(policy, reference, value, reward, pad_token=0, lr=1e-4)
+
+    block_size = config.block_size
+    prompt_len = block_size - 1
+    prompts = torch.randint(1, config.vocab_size, (1, block_size), dtype=torch.long)
+    prompt_mask = torch.zeros_like(prompts)
+    prompt_mask[:, :prompt_len] = 1
+
+    sample = _prepare_sample_batch(prompts, prompt_mask, trainer, max_new_tokens=block_size)
+    assert sample["full"].shape[1] <= block_size
+    assert sample["prompt_lengths"].tolist() == [prompt_len]
+    response_len = sample["response_lengths"][0].item()
+    assert response_len <= block_size - prompt_len
+    assert torch.isclose(sample["responses_mask"].sum(), torch.tensor(float(response_len))).item()
+
+    full_prompts = torch.randint(1, config.vocab_size, (1, block_size), dtype=torch.long)
+    full_mask = torch.ones_like(full_prompts)
+    empty_sample = _prepare_sample_batch(full_prompts, full_mask, trainer, max_new_tokens=block_size)
+    assert empty_sample["full"].numel() == 0
