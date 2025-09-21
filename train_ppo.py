@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from data import PreferenceDataset
 from gpt import GPT, GPTConfig
+from simple_logger import TrainingLogger
 from train_rm import ScalarHead
 
 
@@ -275,6 +276,7 @@ def train_ppo(
     kl_coef: float = 0.1,
     entropy_coef: float = 0.01,
     device: Optional[torch.device] = None,
+    logger: Optional[TrainingLogger] = None,
 ) -> str:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -349,10 +351,19 @@ def train_ppo(
             sample["rewards"] = rewards.detach()
 
             metrics = trainer.train_step(sample)
-            print(
-                f"epoch {epoch + 1} step {start // batch_size + 1}: "
-                f"reward={metrics['reward']:.3f} policy_loss={metrics['policy_loss']:.3f}"
-            )
+            step_index = start // batch_size + 1
+            if logger is not None:
+                log_payload: dict[str, object] = {
+                    "epoch": epoch + 1,
+                    "step": step_index,
+                }
+                log_payload.update(metrics)
+                logger.log(log_payload)
+            else:
+                print(
+                    f"epoch {epoch + 1} step {step_index}: "
+                    f"reward={metrics['reward']:.3f} policy_loss={metrics['policy_loss']:.3f}"
+                )
 
     if out_path:
         directory = os.path.dirname(out_path)
@@ -376,6 +387,7 @@ def main() -> None:
     entropy_coef = 0.01
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger = TrainingLogger("ppo")
     train_ppo(
         preference_path,
         reward_path=reward_path,
@@ -389,7 +401,9 @@ def main() -> None:
         kl_coef=kl_coef,
         entropy_coef=entropy_coef,
         device=device,
+        logger=logger,
     )
+    logger.close()
 
 
 if __name__ == "__main__":
