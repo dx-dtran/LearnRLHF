@@ -148,3 +148,27 @@ def test_prepare_sample_batch_stops_after_eos():
     assert sample["responses"].shape[1] == 2
     assert sample["responses"][0, -1].item() == eos_token
     assert sample["response_lengths"].item() == 2
+
+
+def test_prepare_sample_batch_handles_full_prompts():
+    config, policy, reference, value, reward = build_models()
+    trainer = PPOTrainer(policy, reference, value, reward, pad_token=0, lr=1e-4)
+
+    block_size = config.block_size
+    prompts = torch.arange(block_size, dtype=torch.long).unsqueeze(0) % config.vocab_size
+    prompt_mask = torch.ones_like(prompts)
+
+    sample = _prepare_sample_batch(
+        prompts,
+        prompt_mask,
+        trainer,
+        max_new_tokens=4,
+        pad_token=0,
+        eos_token=1,
+    )
+
+    assert sample["full"].shape[1] == block_size
+    assert sample["responses"].shape[1] == 0
+    assert sample["responses_mask"].shape[1] == 0
+    assert sample["response_lengths"].item() == 0
+    assert sample["response_mask"].sum().item() == 0
