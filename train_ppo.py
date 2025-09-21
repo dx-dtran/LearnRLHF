@@ -1,5 +1,6 @@
 import os
 import random
+import time
 from typing import Optional
 
 import torch
@@ -9,6 +10,7 @@ from torch.utils.data import DataLoader
 
 from data import PreferenceDataset, collate_preferences
 from gpt import GPT, GPTConfig
+from simple_logger import TrainingLogger
 
 
 class ScalarHead(nn.Module):
@@ -260,6 +262,7 @@ def train_reward_model(
     epochs: int,
     lr: float,
     device: torch.device,
+    logger: Optional[TrainingLogger] = None,
 ):
     bundle = dataset.bundle
     loader = DataLoader(
@@ -270,8 +273,11 @@ def train_reward_model(
     )
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     model.train()
-    for _ in range(epochs):
+    iteration = 0
+    for epoch in range(epochs):
+        epoch_iteration = 0
         for batch in loader:
+            start_time = time.perf_counter()
             chosen = batch["chosen"].to(device)
             chosen_mask = batch["chosen_mask"].to(device)
             rejected = batch["rejected"].to(device)
@@ -285,6 +291,20 @@ def train_reward_model(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+
+            iteration += 1
+            epoch_iteration += 1
+            if logger is not None:
+                elapsed = time.perf_counter() - start_time
+                logger.log(
+                    {
+                        "epoch": epoch + 1,
+                        "epoch_iteration": epoch_iteration,
+                        "iteration": iteration,
+                        "loss": loss.item(),
+                        "step_time": elapsed,
+                    }
+                )
 
 
 def train_ppo(
@@ -325,14 +345,19 @@ def train_ppo(
     reference.load_state_dict(policy.state_dict())
 
     pref_data = PreferenceDataset(preference_path, block_size=config.block_size)
-    train_reward_model(
-        reward_model,
-        pref_data,
-        batch_size=rm_batch,
-        epochs=rm_epochs,
-        lr=rm_lr,
-        device=device,
-    )
+    reward_logger = TrainingLogger("reward_model")
+    try:
+        train_reward_model(
+            reward_model,
+            pref_data,
+            batch_size=rm_batch,
+            epochs=rm_epochs,
+            lr=rm_lr,
+            device=device,
+            logger=reward_logger,
+        )
+    finally:
+        reward_logger.close()
 
     bundle = pref_data.bundle
     trainer = PPOTrainer(
@@ -355,37 +380,60 @@ def train_ppo(
     ]
 
     policy.train()
-    for epoch in range(ppo_epochs):
-        for batch_prompts in batches:
-            if not batch_prompts:
-                continue
-            pad_len = max(p.size(0) for p in batch_prompts)
-            prompt_tensor = torch.full((len(batch_prompts), pad_len), bundle.pad, dtype=torch.long)
-            prompt_mask = torch.zeros_like(prompt_tensor, dtype=torch.float32)
-            for i, prompt in enumerate(batch_prompts):
-                length = prompt.size(0)
-                prompt_tensor[i, :length] = prompt
-                prompt_mask[i, :length] = 1
-            prompt_tensor = prompt_tensor.to(device)
-            prompt_mask = prompt_mask.to(device)
+    ppo_logger = TrainingLogger("ppo")
+    ppo_iteration = 0
+    try:
+        for epoch in range(ppo_epochs):
+            epoch_iteration = 0
+            for batch_prompts in batches:
+                if not batch_prompts:
+                    continue
+                pad_len = max(p.size(0) for p in batch_prompts)
+                prompt_tensor = torch.full((len(batch_prompts), pad_len), bundle.pad, dtype=torch.long)
+                prompt_mask = torch.zeros_like(prompt_tensor, dtype=torch.float32)
+                for i, prompt in enumerate(batch_prompts):
+                    length = prompt.size(0)
+                    prompt_tensor[i, :length] = prompt
+                    prompt_mask[i, :length] = 1
+                prompt_tensor = prompt_tensor.to(device)
+                prompt_mask = prompt_mask.to(device)
 
-            sampled = trainer.sample(prompt_tensor, prompt_mask, max_new)
+                sampled = trainer.sample(prompt_tensor, prompt_mask, max_new)
 
-            full = sampled["full"]
-            mask = sampled["full_mask"]
-            rewards = reward_model(full, mask)
-            advantages = rewards - sampled["old_values"]
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
-            sampled["advantages"] = advantages.detach()
-            sampled["rewards"] = rewards.detach()
+                full = sampled["full"]
+                mask = sampled["full_mask"]
+                rewards = reward_model(full, mask)
+                advantages = rewards - sampled["old_values"]
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
+                sampled["advantages"] = advantages.detach()
+                sampled["rewards"] = rewards.detach()
 
-            for _ in range(ppo_steps):
-                metrics = trainer.train_step(sampled)
+                for _ in range(ppo_steps):
+                    start_time = time.perf_counter()
+                    metrics = trainer.train_step(sampled)
+                    elapsed = time.perf_counter() - start_time
+                    ppo_iteration += 1
+                    epoch_iteration += 1
+                    ppo_logger.log(
+                        {
+                            "epoch": epoch + 1,
+                            "epoch_iteration": epoch_iteration,
+                            "iteration": ppo_iteration,
+                            "policy_loss": metrics["policy_loss"],
+                            "value_loss": metrics["value_loss"],
+                            "kl": metrics["kl"],
+                            "entropy": metrics["entropy"],
+                            "reward": metrics["reward"],
+                            "step_time": elapsed,
+                        }
+                    )
 
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
             path = os.path.join(out_dir, f"ppo_epoch_{epoch+1}.pt")
             torch.save(policy.state_dict(), path)
+    finally:
+        ppo_logger.close()
 
 
 if __name__ == "__main__":
