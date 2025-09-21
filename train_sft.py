@@ -93,6 +93,16 @@ def train_sft(
                 optimizer.zero_grad()
             step += 1
 
+        if step % accum != 0:
+            grad_step = step // accum
+            lr_now = cosine_schedule(grad_step, total_steps, lr, warmup)
+            for g in optimizer.param_groups:
+                g["lr"] = lr_now
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
+            step = (grad_step + 1) * accum
+
         os.makedirs(out_dir, exist_ok=True)
         fname = os.path.join(out_dir, f"sft_epoch_{epoch+1}.pt")
         torch.save(model.state_dict(), fname)
