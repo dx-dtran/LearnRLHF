@@ -6,40 +6,7 @@ from typing import Iterable
 import torch
 from torch.utils.data import Dataset
 
-try:  # pragma: no cover - optional dependency
-    import tiktoken
-except Exception:  # pragma: no cover - fallback when tiktoken is unavailable
-    tiktoken = None
-
-
-class _FallbackEncoding:
-    """Extremely small tokenizer used when ``tiktoken`` is missing.
-
-    Tokens are whitespace separated so that the repository can run without any
-    external downloads.  It only keeps track of the tokens that appear in the
-    loaded dataset which mirrors the behaviour of classic toy language models.
-    """
-
-    def __init__(self) -> None:
-        self.stoi: dict[str, int] = {"<pad>": 0, "<eos>": 1}
-        self.itos: list[str] = ["<pad>", "<eos>"]
-
-    @property
-    def bos_token(self) -> int:
-        return 1
-
-    @property
-    def eos_token(self) -> int:
-        return 1
-
-    def encode(self, text: str) -> list[int]:
-        tokens = []
-        for piece in text.split():
-            if piece not in self.stoi:
-                self.stoi[piece] = len(self.itos)
-                self.itos.append(piece)
-            tokens.append(self.stoi[piece])
-        return tokens
+import tiktoken
 
 
 @dataclass
@@ -54,18 +21,21 @@ class TokenizerBundle:
 
 
 def build_tokenizer() -> TokenizerBundle:
-    if tiktoken is not None:
-        try:
-            enc = tiktoken.get_encoding("gpt2")
-        except Exception:
-            enc = None
-        else:
-            bos = enc._special_tokens.get("<|bos|>", enc.eot_token)
-            eos = enc.eot_token
-            pad = eos
-            return TokenizerBundle(enc, bos, eos, pad)
-    fallback = _FallbackEncoding()
-    return TokenizerBundle(fallback, fallback.bos_token, fallback.eos_token, 0)
+    byte_tokens = {bytes([i]): i for i in range(256)}
+    bos_id = len(byte_tokens)
+    eos_id = bos_id + 1
+    pad_id = eos_id + 1
+    special_tokens = {"<|bos|>": bos_id, "<|eos|>": eos_id, "<|pad|>": pad_id}
+    enc = tiktoken.Encoding(
+        "byte-level-minimal",
+        pat_str=r"(?s).",
+        mergeable_ranks=byte_tokens,
+        special_tokens=special_tokens,
+    )
+    bos = special_tokens["<|bos|>"]
+    eos = special_tokens["<|eos|>"]
+    pad = special_tokens["<|pad|>"]
+    return TokenizerBundle(enc, bos, eos, pad)
 
 
 def load_jsonl(path: str | Path) -> Iterable[dict]:
