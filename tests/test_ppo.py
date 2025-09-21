@@ -9,7 +9,8 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.append(ROOT)
 
 from gpt import GPTConfig, GPT
-from train_ppo import ScalarHead, PPOTrainer, gather_log_probs
+from reward_model import ScalarHead
+from train_ppo import PPOTrainer, gather_log_probs
 from train_ppo import train_ppo  # noqa: F401  # ensure module imports without argparse
 
 
