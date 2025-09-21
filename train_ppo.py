@@ -1,6 +1,6 @@
+from __future__ import annotations
+
 import os
-import random
-import time
 from typing import Optional
 
 import torch
@@ -8,67 +8,43 @@ import torch.nn.functional as F
 
 from data import PreferenceDataset
 from gpt import GPT, GPTConfig
-from train_rm import ScalarHead, train_reward_model
-from simple_logger import TrainingLogger
+from train_rm import ScalarHead
 
 
-def pad_responses(
-    responses: list[torch.Tensor], pad: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if not responses:
+def _pad_batch(seqs: list[torch.Tensor], pad_token: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if not seqs:
         return (
             torch.zeros(0, 0, dtype=torch.long),
             torch.zeros(0, 0, dtype=torch.float32),
         )
-    max_len = max(r.size(0) for r in responses)
-    out = torch.full((len(responses), max_len), pad, dtype=torch.long)
-    mask = torch.zeros((len(responses), max_len), dtype=torch.float32)
-    for i, resp in enumerate(responses):
-        length = resp.size(0)
+    max_len = max(seq.size(0) for seq in seqs)
+    tokens = torch.full((len(seqs), max_len), pad_token, dtype=torch.long)
+    mask = torch.zeros((len(seqs), max_len), dtype=torch.float32)
+    for i, seq in enumerate(seqs):
+        length = seq.size(0)
         if length:
-            out[i, :length] = resp
-            mask[i, :length] = 1
-    return out, mask
-
-
-def build_full_sequences(
-    prompts: list[torch.Tensor],
-    responses: list[torch.Tensor],
-    pad: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    full_lengths = [p.size(0) + r.size(0) for p, r in zip(prompts, responses)]
-    max_full = max(full_lengths) if full_lengths else 0
-    batch = torch.full((len(prompts), max_full), pad, dtype=torch.long)
-    mask = torch.zeros_like(batch, dtype=torch.float32)
-    response_mask = torch.zeros_like(batch, dtype=torch.float32)
-    for i, (prompt, response) in enumerate(zip(prompts, responses)):
-        p_len = prompt.size(0)
-        r_len = response.size(0)
-        batch[i, :p_len] = prompt
-        mask[i, :p_len] = 1
-        if r_len:
-            batch[i, p_len : p_len + r_len] = response
-            mask[i, p_len : p_len + r_len] = 1
-            response_mask[i, p_len : p_len + r_len] = 1
-    return batch, mask, response_mask
+            tokens[i, :length] = seq
+            mask[i, :length] = 1.0
+    return tokens, mask
 
 
 def gather_log_probs(
     log_probs: torch.Tensor,
-    tokens: torch.Tensor,
+    responses: torch.Tensor,
     prompt_lengths: torch.Tensor,
     response_lengths: torch.Tensor,
 ) -> torch.Tensor:
-    batch, max_len = tokens.shape
-    out = log_probs.new_zeros(batch, max_len)
+    batch, max_response = responses.shape
+    collected = log_probs.new_zeros(batch, max_response)
     for i in range(batch):
-        r_len = int(response_lengths[i].item())
         start = int(prompt_lengths[i].item())
-        if r_len == 0:
+        length = int(response_lengths[i].item())
+        if length == 0:
             continue
-        slice_log = log_probs[i, start : start + r_len]
-        out[i, :r_len] = slice_log.gather(1, tokens[i, :r_len].unsqueeze(-1)).squeeze(-1)
-    return out
+        token_slice = responses[i, :length]
+        log_slice = log_probs[i, start : start + length]
+        collected[i, :length] = log_slice.gather(1, token_slice.unsqueeze(-1)).squeeze(-1)
+    return collected
 
 
 class PPOTrainer:
@@ -83,7 +59,7 @@ class PPOTrainer:
         kl: float = 0.1,
         entropy: float = 0.01,
         lr: float = 1e-5,
-    ):
+    ) -> None:
         self.policy = policy
         self.reference = reference
         self.value = value
@@ -101,57 +77,6 @@ class PPOTrainer:
         self.policy_opt = torch.optim.AdamW(self.policy.parameters(), lr=lr)
         self.value_opt = torch.optim.AdamW(self.value.parameters(), lr=lr)
 
-    def sample(self, prompts: torch.Tensor, mask: torch.Tensor, max_new: int) -> dict[str, torch.Tensor]:
-        device = prompts.device
-        prompt_lengths = mask.sum(dim=1)
-        sequences = []
-        responses = []
-        for i in range(prompts.size(0)):
-            length = int(prompt_lengths[i].item())
-            seq = prompts[i, :length].unsqueeze(0)
-            seq = seq.to(device)
-            generated = self.policy.generate(seq, max_new, eos_token=self.pad)
-            full = generated[0]
-            response = full[length:]
-            sequences.append(full.cpu())
-            responses.append(response.cpu())
-
-        response_pad, response_mask = pad_responses(responses, self.pad)
-        prompt_list = [prompts[i, : int(prompt_lengths[i].item())].cpu() for i in range(prompts.size(0))]
-        full, full_mask, response_token_mask = build_full_sequences(prompt_list, responses, self.pad)
-
-        prompt_lengths = torch.tensor([p.size(0) for p in prompt_list], device=device)
-        response_lengths = torch.tensor([r.size(0) for r in responses], device=device)
-
-        full = full.to(device)
-        full_mask = full_mask.to(device)
-        response_token_mask = response_token_mask.to(device)
-        response_pad = response_pad.to(device)
-        response_mask = response_mask.to(device)
-
-        with torch.no_grad():
-            logits, _ = self.policy(full, attention_mask=full_mask)
-            log_probs = F.log_softmax(logits, dim=-1)
-            old_log = gather_log_probs(
-                log_probs,
-                response_pad,
-                prompt_lengths,
-                response_lengths,
-            )
-            values = self.value(full, full_mask)
-
-        return {
-            "full": full,
-            "full_mask": full_mask,
-            "response_mask": response_token_mask,
-            "responses": response_pad,
-            "responses_mask": response_mask,
-            "prompt_lengths": prompt_lengths,
-            "response_lengths": response_lengths,
-            "old_log_probs": old_log,
-            "old_values": values,
-        }
-
     def compute_policy_losses(
         self,
         log_probs: torch.Tensor,
@@ -164,19 +89,15 @@ class PPOTrainer:
         advantages: torch.Tensor,
         old_log_probs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        new_log_probs = gather_log_probs(
-            log_probs,
-            responses,
-            prompt_lengths,
-            response_lengths,
-        )
-
+        new_log_probs = gather_log_probs(log_probs, responses, prompt_lengths, response_lengths)
         ratios = (new_log_probs - old_log_probs).exp()
-        policy_targets = advantages.unsqueeze(1) * responses_mask
-        unclipped = ratios * policy_targets
-        clipped = torch.clamp(ratios, 1.0 - self.clip, 1.0 + self.clip) * policy_targets
-        denom = responses_mask.sum().clamp(min=1.0)
-        policy_loss = -torch.sum(torch.minimum(unclipped, clipped)) / denom
+        advantages = advantages.unsqueeze(1)
+
+        unclipped = ratios * advantages
+        clipped = torch.clamp(ratios, 1.0 - self.clip, 1.0 + self.clip) * advantages
+        mask = responses_mask
+        denom = mask.sum().clamp(min=1.0)
+        policy_loss = -torch.sum(torch.minimum(unclipped, clipped) * mask) / denom
 
         probs = log_probs.exp()
         kl_per_token = (probs * (log_probs - ref_log_probs)).sum(dim=-1)
@@ -184,23 +105,24 @@ class PPOTrainer:
 
         entropy_per_token = -(probs * log_probs).sum(dim=-1)
         entropy = (entropy_per_token * full_response_mask).sum() / full_response_mask.sum().clamp(min=1.0)
+
         return policy_loss, kl, entropy
 
     def train_step(self, batch: dict[str, torch.Tensor]) -> dict[str, float]:
         full = batch["full"]
         full_mask = batch["full_mask"]
-        response_mask = batch["response_mask"]
         responses = batch["responses"]
         responses_mask = batch["responses_mask"]
         prompt_lengths = batch["prompt_lengths"]
         response_lengths = batch["response_lengths"]
         old_log_probs = batch["old_log_probs"]
+        advantages = batch["advantages"]
         old_values = batch["old_values"]
+        rewards = batch["rewards"]
+        response_mask = batch["response_mask"]
 
         logits, _ = self.policy(full, attention_mask=full_mask)
         log_probs = F.log_softmax(logits, dim=-1)
-        advantages = batch["advantages"]
-
         with torch.no_grad():
             ref_logits, _ = self.reference(full, attention_mask=full_mask)
             ref_log_probs = F.log_softmax(ref_logits, dim=-1)
@@ -217,83 +139,153 @@ class PPOTrainer:
             old_log_probs,
         )
 
-        rewards = batch["rewards"]
-        values = self.value(full, full_mask)
-        value_loss = F.mse_loss(values, rewards)
-
+        policy_objective = policy_loss + self.kl * kl - self.entropy * entropy
         self.policy_opt.zero_grad()
-        total_policy = policy_loss + self.kl * kl - self.entropy * entropy
-        total_policy.backward()
+        policy_objective.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
         self.policy_opt.step()
 
+        predicted_values = self.value(full, full_mask)
+        target_values = rewards.to(predicted_values.device)
+        value_loss = torch.nn.functional.mse_loss(predicted_values, target_values)
         self.value_opt.zero_grad()
         value_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.value.parameters(), 1.0)
         self.value_opt.step()
 
+        improvement = (predicted_values - old_values.to(predicted_values.device)).mean()
+
         return {
-            "policy_loss": policy_loss.item(),
-            "value_loss": value_loss.item(),
-            "kl": kl.item(),
-            "entropy": entropy.item(),
-            "reward": rewards.mean().item(),
+            "policy_loss": float(policy_loss.item()),
+            "value_loss": float(value_loss.item()),
+            "kl": float(kl.item()),
+            "entropy": float(entropy.item()),
+            "value_improvement": float(improvement.item()),
+            "reward": float(rewards.mean().item()),
         }
+
+
+def _prepare_sample_batch(
+    prompts: torch.Tensor,
+    prompt_mask: torch.Tensor,
+    trainer: PPOTrainer,
+    max_new_tokens: int,
+) -> dict[str, torch.Tensor]:
+    device = prompts.device
+    pad = trainer.pad
+
+    prompt_lengths = prompt_mask.sum(dim=1).long().tolist()
+    prompt_list = [prompts[i, : length].cpu() for i, length in enumerate(prompt_lengths)]
+
+    responses: list[torch.Tensor] = []
+    full_sequences: list[torch.Tensor] = []
+    response_lengths: list[int] = []
+    for prompt, length in zip(prompt_list, prompt_lengths):
+        generated = trainer.policy.generate(prompt.unsqueeze(0).to(device), max_new_tokens, eos_token=pad)
+        full = generated[0].detach().cpu()
+        response = full[length:]
+        full_sequences.append(full)
+        responses.append(response)
+        response_lengths.append(response.size(0))
+
+    full_tokens, full_mask = _pad_batch(full_sequences, pad)
+    responses_tokens, responses_mask = _pad_batch(responses, pad)
+
+    response_token_mask = torch.zeros_like(full_mask)
+    for i, (p_len, r_len) in enumerate(zip(prompt_lengths, response_lengths)):
+        if r_len:
+            response_token_mask[i, p_len : p_len + r_len] = 1.0
+
+    full_tokens = full_tokens.to(device)
+    full_mask = full_mask.to(device)
+    responses_tokens = responses_tokens.to(device)
+    responses_mask = responses_mask.to(device)
+    response_token_mask = response_token_mask.to(device)
+    prompt_lengths_tensor = torch.tensor(prompt_lengths, device=device, dtype=torch.long)
+    response_lengths_tensor = torch.tensor(response_lengths, device=device, dtype=torch.long)
+
+    with torch.no_grad():
+        logits, _ = trainer.policy(full_tokens, attention_mask=full_mask)
+        log_probs = F.log_softmax(logits, dim=-1)
+        old_log_probs = gather_log_probs(
+            log_probs,
+            responses_tokens,
+            prompt_lengths_tensor,
+            response_lengths_tensor,
+        )
+        old_values = trainer.value(full_tokens, full_mask)
+
+    return {
+        "full": full_tokens,
+        "full_mask": full_mask,
+        "responses": responses_tokens,
+        "responses_mask": responses_mask,
+        "prompt_lengths": prompt_lengths_tensor,
+        "response_lengths": response_lengths_tensor,
+        "old_log_probs": old_log_probs.detach(),
+        "old_values": old_values.detach(),
+        "response_mask": response_token_mask,
+    }
+
+
+def _batch_prompts(rows: list[dict[str, torch.Tensor]], pad: int) -> tuple[torch.Tensor, torch.Tensor]:
+    prompts = [row["prompt"] for row in rows]
+    tokens, mask = _pad_batch(prompts, pad)
+    return tokens, mask
 
 
 def train_ppo(
     preference_path: str,
     *,
-    sft_path: Optional[str] = None,
-    out_dir: str = "ppo_weights",
-    dropout: float = 0.0,
-    rm_batch: int = 4,
-    rm_epochs: int = 1,
-    rm_lr: float = 1e-5,
-    ppo_batch: int = 4,
-    ppo_epochs: int = 1,
-    ppo_steps: int = 4,
-    max_new: int = 64,
-    ppo_lr: float = 1e-5,
+    reward_path: str,
+    policy_init: Optional[str] = None,
+    out_path: str = "weights/ppo_policy.pt",
+    batch_size: int = 4,
+    epochs: int = 1,
+    max_new_tokens: int = 64,
+    lr: float = 1e-5,
     clip: float = 0.2,
     kl_coef: float = 0.1,
     entropy_coef: float = 0.01,
     device: Optional[torch.device] = None,
-) -> None:
+) -> str:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    config = GPTConfig(dropout=dropout)
+    if not os.path.exists(preference_path):
+        raise FileNotFoundError(
+            f"Preference data not found at {preference_path}. Prepare the JSONL file before training."
+        )
+    if not os.path.exists(reward_path):
+        raise FileNotFoundError(
+            f"Reward model weights not found at {reward_path}. Train the reward model first."
+        )
 
-    policy = GPT(config).to(device)
-    reference = GPT(config).to(device)
-    value_model = ScalarHead(config).to(device)
-    reward_model = ScalarHead(config).to(device)
+    config = GPTConfig()
+    policy = GPT(config)
+    reference = GPT(config)
+    value_model = ScalarHead(config)
+    reward_model = ScalarHead(config)
 
-    if sft_path:
-        state = torch.load(sft_path, map_location="cpu")
+    if policy_init:
+        state = torch.load(policy_init, map_location="cpu")
         policy.load_state_dict(state, strict=False)
         reference.load_state_dict(state, strict=False)
         value_model.body.load_state_dict(state, strict=False)
-        reward_model.body.load_state_dict(state, strict=False)
+
     reference.load_state_dict(policy.state_dict())
+    value_model.body.load_state_dict(policy.state_dict(), strict=False)
+    reward_state = torch.load(reward_path, map_location="cpu")
+    reward_model.load_state_dict(reward_state, strict=False)
 
-    pref_data = PreferenceDataset(preference_path, block_size=config.block_size)
-    reward_logger = TrainingLogger("reward_model")
-    try:
-        train_reward_model(
-            reward_model,
-            pref_data,
-            batch_size=rm_batch,
-            epochs=rm_epochs,
-            lr=rm_lr,
-            device=device,
-            logger=reward_logger,
-        )
-    finally:
-        reward_logger.close()
+    policy.to(device)
+    reference.to(device)
+    value_model.to(device)
+    reward_model.to(device)
 
-    bundle = pref_data.bundle
+    dataset = PreferenceDataset(preference_path, block_size=config.block_size)
+    bundle = dataset.bundle
+
     trainer = PPOTrainer(
         policy,
         reference,
@@ -303,109 +295,73 @@ def train_ppo(
         clip=clip,
         kl=kl_coef,
         entropy=entropy_coef,
-        lr=ppo_lr,
+        lr=lr,
     )
 
-    prompts = [sample["prompt"] for sample in pref_data.samples]
-    random.shuffle(prompts)
-    batches = [
-        prompts[i : i + ppo_batch]
-        for i in range(0, len(prompts), ppo_batch)
-    ]
+    for epoch in range(epochs):
+        order = torch.randperm(len(dataset))
+        for start in range(0, len(dataset), batch_size):
+            indices = order[start : start + batch_size]
+            rows = [dataset[int(i)] for i in indices]
+            if not rows:
+                continue
+            prompt_tokens, prompt_mask = _batch_prompts(rows, bundle.pad)
+            prompt_tokens = prompt_tokens.to(device)
+            prompt_mask = prompt_mask.to(device)
 
-    policy.train()
-    ppo_logger = TrainingLogger("ppo")
-    ppo_iteration = 0
-    try:
-        for epoch in range(ppo_epochs):
-            epoch_iteration = 0
-            for batch_prompts in batches:
-                if not batch_prompts:
-                    continue
-                pad_len = max(p.size(0) for p in batch_prompts)
-                prompt_tensor = torch.full((len(batch_prompts), pad_len), bundle.pad, dtype=torch.long)
-                prompt_mask = torch.zeros_like(prompt_tensor, dtype=torch.float32)
-                for i, prompt in enumerate(batch_prompts):
-                    length = prompt.size(0)
-                    prompt_tensor[i, :length] = prompt
-                    prompt_mask[i, :length] = 1
-                prompt_tensor = prompt_tensor.to(device)
-                prompt_mask = prompt_mask.to(device)
-
-                sampled = trainer.sample(prompt_tensor, prompt_mask, max_new)
-
-                full = sampled["full"]
-                mask = sampled["full_mask"]
-                rewards = reward_model(full, mask)
-                advantages = rewards - sampled["old_values"]
+            sample = _prepare_sample_batch(prompt_tokens, prompt_mask, trainer, max_new_tokens)
+            with torch.no_grad():
+                rewards = reward_model(sample["full"], sample["full_mask"])
+            advantages = rewards - sample["old_values"]
+            if advantages.numel():
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
-                sampled["advantages"] = advantages.detach()
-                sampled["rewards"] = rewards.detach()
 
-                for _ in range(ppo_steps):
-                    start_time = time.perf_counter()
-                    metrics = trainer.train_step(sampled)
-                    elapsed = time.perf_counter() - start_time
-                    ppo_iteration += 1
-                    epoch_iteration += 1
-                    ppo_logger.log(
-                        {
-                            "epoch": epoch + 1,
-                            "epoch_iteration": epoch_iteration,
-                            "iteration": ppo_iteration,
-                            "policy_loss": metrics["policy_loss"],
-                            "value_loss": metrics["value_loss"],
-                            "kl": metrics["kl"],
-                            "entropy": metrics["entropy"],
-                            "reward": metrics["reward"],
-                            "step_time": elapsed,
-                        }
-                    )
+            sample["advantages"] = advantages.detach()
+            sample["rewards"] = rewards.detach()
 
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
-            path = os.path.join(out_dir, f"ppo_epoch_{epoch+1}.pt")
-            torch.save(policy.state_dict(), path)
-    finally:
-        ppo_logger.close()
+            metrics = trainer.train_step(sample)
+            print(
+                f"epoch {epoch + 1} step {start // batch_size + 1}: "
+                f"reward={metrics['reward']:.3f} policy_loss={metrics['policy_loss']:.3f}"
+            )
+
+    if out_path:
+        directory = os.path.dirname(out_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        torch.save(policy.state_dict(), out_path)
+    return out_path
+
+
+def main() -> None:
+    preference_path = "data/hh_rlhf_preferences_train.jsonl"
+    reward_path = "weights/reward_model.pt"
+    policy_init = None
+    out_path = "weights/ppo_policy.pt"
+    batch_size = 4
+    epochs = 1
+    max_new_tokens = 64
+    lr = 1e-5
+    clip = 0.2
+    kl_coef = 0.1
+    entropy_coef = 0.01
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    train_ppo(
+        preference_path,
+        reward_path=reward_path,
+        policy_init=policy_init,
+        out_path=out_path,
+        batch_size=batch_size,
+        epochs=epochs,
+        max_new_tokens=max_new_tokens,
+        lr=lr,
+        clip=clip,
+        kl_coef=kl_coef,
+        entropy_coef=entropy_coef,
+        device=device,
+    )
 
 
 if __name__ == "__main__":
-    PREFERENCE_PATH = "data/preferences_train.jsonl"
-    SFT_PATH = None
-    OUT_DIR = "ppo_weights"
-    DROPOUT = 0.0
-    RM_BATCH = 4
-    RM_EPOCHS = 1
-    RM_LR = 1e-5
-    PPO_BATCH = 4
-    PPO_EPOCHS = 1
-    PPO_STEPS = 4
-    MAX_NEW = 64
-    PPO_LR = 1e-5
-    CLIP = 0.2
-    KL_COEF = 0.1
-    ENTROPY_COEF = 0.01
-
-    if not os.path.exists(PREFERENCE_PATH):
-        raise FileNotFoundError(
-            f"Preference data not found at {PREFERENCE_PATH}. Update the path before running."
-        )
-
-    train_ppo(
-        PREFERENCE_PATH,
-        sft_path=SFT_PATH,
-        out_dir=OUT_DIR,
-        dropout=DROPOUT,
-        rm_batch=RM_BATCH,
-        rm_epochs=RM_EPOCHS,
-        rm_lr=RM_LR,
-        ppo_batch=PPO_BATCH,
-        ppo_epochs=PPO_EPOCHS,
-        ppo_steps=PPO_STEPS,
-        max_new=MAX_NEW,
-        ppo_lr=PPO_LR,
-        clip=CLIP,
-        kl_coef=KL_COEF,
-        entropy_coef=ENTROPY_COEF,
-    )
+    main()
