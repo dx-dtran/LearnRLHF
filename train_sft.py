@@ -1,5 +1,6 @@
 import math
 import os
+import time
 from typing import Optional
 
 import torch
@@ -8,6 +9,7 @@ from torch.utils.data import DataLoader
 
 from data import SupervisedDataset, collate_supervised, build_tokenizer
 from gpt import GPT, GPTConfig
+from simple_logger import TrainingLogger
 
 
 def cosine_schedule(step: int, total_steps: int, base_lr: float, warmup: int) -> float:
@@ -70,42 +72,91 @@ def train_sft(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
 
-    total_steps = epochs * math.ceil(len(loader) / accum)
-    step = 0
+    updates_per_epoch = math.ceil(len(loader) / accum)
+    total_updates = epochs * updates_per_epoch
+    update_index = 0
+    micro_step = 0
+    update_timer = time.perf_counter()
+    accumulated_loss = 0.0
+
+    logger = TrainingLogger("sft")
 
     model.train()
-    for epoch in range(epochs):
-        for batch in loader:
-            inputs = batch["input_ids"].to(device)
-            targets = batch["target_ids"].to(device)
-            mask = batch["attention_mask"].to(device).to(inputs.dtype)
+    try:
+        for epoch in range(epochs):
+            epoch_updates = 0
+            for batch in loader:
+                micro_step += 1
+                if (micro_step - 1) % accum == 0:
+                    update_timer = time.perf_counter()
+                    accumulated_loss = 0.0
 
-            logits, _ = model(inputs, attention_mask=mask)
-            loss = supervised_loss(logits, targets, mask) / accum
-            loss.backward()
+                inputs = batch["input_ids"].to(device)
+                targets = batch["target_ids"].to(device)
+                mask = batch["attention_mask"].to(device).to(inputs.dtype)
 
-            if (step + 1) % accum == 0:
-                lr_now = cosine_schedule(step // accum, total_steps, lr, warmup)
+                logits, _ = model(inputs, attention_mask=mask)
+                loss = supervised_loss(logits, targets, mask) / accum
+                accumulated_loss += loss.item()
+                loss.backward()
+
+                performed_step = False
+                if micro_step % accum == 0:
+                    lr_now = cosine_schedule(update_index, total_updates, lr, warmup)
+                    for g in optimizer.param_groups:
+                        g["lr"] = lr_now
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    update_index += 1
+                    epoch_updates += 1
+                    performed_step = True
+
+                if performed_step:
+                    elapsed = time.perf_counter() - update_timer
+                    logger.log(
+                        {
+                            "epoch": epoch + 1,
+                            "epoch_iteration": epoch_updates,
+                            "iteration": update_index,
+                            "loss": accumulated_loss,
+                            "lr": optimizer.param_groups[0]["lr"],
+                            "step_time": elapsed,
+                        }
+                    )
+                    update_timer = time.perf_counter()
+                    accumulated_loss = 0.0
+
+            if micro_step % accum != 0:
+                lr_now = cosine_schedule(update_index, total_updates, lr, warmup)
                 for g in optimizer.param_groups:
                     g["lr"] = lr_now
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
-            step += 1
+                update_index += 1
+                epoch_updates += 1
+                elapsed = time.perf_counter() - update_timer
+                logger.log(
+                    {
+                        "epoch": epoch + 1,
+                        "epoch_iteration": epoch_updates,
+                        "iteration": update_index,
+                        "loss": accumulated_loss,
+                        "lr": optimizer.param_groups[0]["lr"],
+                        "step_time": elapsed,
+                    }
+                )
+                update_timer = time.perf_counter()
+                accumulated_loss = 0.0
 
-        if step % accum != 0:
-            grad_step = step // accum
-            lr_now = cosine_schedule(grad_step, total_steps, lr, warmup)
-            for g in optimizer.param_groups:
-                g["lr"] = lr_now
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            optimizer.zero_grad()
-            step = (grad_step + 1) * accum
+            micro_step = update_index * accum
 
         os.makedirs(out_dir, exist_ok=True)
         fname = os.path.join(out_dir, f"sft_epoch_{epoch+1}.pt")
         torch.save(model.state_dict(), fname)
+    finally:
+        logger.close()
 
 
 if __name__ == "__main__":
