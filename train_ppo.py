@@ -170,9 +170,10 @@ def _prepare_sample_batch(
     prompt_mask: torch.Tensor,
     trainer: PPOTrainer,
     max_new_tokens: int,
+    pad_token: int,
+    eos_token: int,
 ) -> dict[str, torch.Tensor]:
     device = prompts.device
-    pad = trainer.pad
 
     prompt_lengths = prompt_mask.sum(dim=1).long().tolist()
     prompt_list = [prompts[i, : length].cpu() for i, length in enumerate(prompt_lengths)]
@@ -181,15 +182,17 @@ def _prepare_sample_batch(
     full_sequences: list[torch.Tensor] = []
     response_lengths: list[int] = []
     for prompt, length in zip(prompt_list, prompt_lengths):
-        generated = trainer.policy.generate(prompt.unsqueeze(0).to(device), max_new_tokens, eos_token=pad)
+        generated = trainer.policy.generate(
+            prompt.unsqueeze(0).to(device), max_new_tokens, eos_token=eos_token
+        )
         full = generated[0].detach().cpu()
         response = full[length:]
         full_sequences.append(full)
         responses.append(response)
         response_lengths.append(response.size(0))
 
-    full_tokens, full_mask = _pad_batch(full_sequences, pad)
-    responses_tokens, responses_mask = _pad_batch(responses, pad)
+    full_tokens, full_mask = _pad_batch(full_sequences, pad_token)
+    responses_tokens, responses_mask = _pad_batch(responses, pad_token)
 
     response_token_mask = torch.zeros_like(full_mask)
     for i, (p_len, r_len) in enumerate(zip(prompt_lengths, response_lengths)):
@@ -309,7 +312,14 @@ def train_ppo(
             prompt_tokens = prompt_tokens.to(device)
             prompt_mask = prompt_mask.to(device)
 
-            sample = _prepare_sample_batch(prompt_tokens, prompt_mask, trainer, max_new_tokens)
+            sample = _prepare_sample_batch(
+                prompt_tokens,
+                prompt_mask,
+                trainer,
+                max_new_tokens,
+                bundle.pad,
+                bundle.eos,
+            )
             with torch.no_grad():
                 rewards = reward_model(sample["full"], sample["full_mask"])
             advantages = rewards - sample["old_values"]
