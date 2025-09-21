@@ -86,9 +86,10 @@ with:
 python train_sft.py
 ```
 
-The defaults mirror a minimal run on the Anthropic HH SFT split. Set
-`device_spec` to "cuda" or "cpu" if you need to force device selection, and
-adjust `accum` to enable gradient accumulation when memory is limited.
+The defaults mirror a minimal run on the Anthropic HH SFT split. Set the
+`device` variable to "cuda" or "cpu" if you need to force device selection, and
+increase `grad_accumulation_steps` to enable gradient accumulation when memory
+is limited.
 
 ## Reward model fitting
 
@@ -100,8 +101,8 @@ python train_rm.py
 ```
 
 The reward-model script shares the same configuration style, including support
-for reusing an SFT checkpoint via `init_path` and switching devices with
-`device_spec`.
+for reusing an SFT checkpoint via `init_path`, toggling gradient accumulation
+through `grad_accumulation_steps`, and switching devices by setting `device`.
 
 ## PPO-based RLHF
 
@@ -110,7 +111,7 @@ can either import and call it directly or edit the constants at the bottom of
 `train_ppo.py` and run `python train_ppo.py`.
 
 Both training scripts now assume single-GPU execution. Gradient accumulation is
-available through the `accum` (SFT) and `ppo_steps` parameters.
+available through the shared `grad_accumulation_steps` argument.
 
 ## Testing
 
