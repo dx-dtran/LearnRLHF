@@ -1,204 +1,137 @@
-import time
-import torch
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import CosineAnnealingLR
-import logging
-from datetime import datetime
+import math
 import os
-from sft_data import SupervisedFineTuningDataset, collate_fn
-from gpt import GPT, GPTConfig, transpose_specific_layers
+from typing import Optional
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
+from data import SupervisedDataset, collate_supervised, build_tokenizer
+from gpt import GPT, GPTConfig
 
 
-def setup_logger():
-    timestamp = datetime.now().strftime("%m-%d-%Y-%H-%M-%S")
-    log_file = f"training-{timestamp}.log"
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
+def cosine_schedule(step: int, total_steps: int, base_lr: float, warmup: int) -> float:
+    if step < warmup:
+        return base_lr * (step + 1) / max(1, warmup)
+    progress = (step - warmup) / max(1, total_steps - warmup)
+    return 0.5 * base_lr * (1.0 + math.cos(math.pi * progress))
+
+
+def supervised_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Compute the masked language modeling loss used for SFT training."""
+
+    log_probs = F.log_softmax(logits, dim=-1)
+    loss = F.nll_loss(
+        log_probs.transpose(1, 2),
+        targets,
+        reduction="none",
+        ignore_index=-1,
     )
-    return logging.getLogger(), timestamp
+    mask = mask.to(log_probs.dtype)
+    denom = mask.sum().clamp(min=1.0)
+    return (loss * mask).sum() / denom
 
 
-def estimate_val_loss(model, dataloader, device, logger, num_batches=10):
-    model.eval()
-    total_loss = 0.0
-    with torch.no_grad():
-        for i, batch in enumerate(dataloader):
-            if i >= num_batches:
-                break
+def train_sft(
+    data_path: str,
+    *,
+    out_dir: str = "weights",
+    batch_size: int = 4,
+    lr: float = 5e-5,
+    epochs: int = 1,
+    accum: int = 1,
+    warmup: int = 100,
+    init_path: Optional[str] = None,
+    dropout: float = 0.0,
+    device: Optional[torch.device] = None,
+) -> None:
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-            input_ids = batch["input_ids"].to(device)
-            target_ids = batch["target_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-
-            logits, loss = model(
-                input_ids, targets=target_ids, attention_mask=attention_mask
-            )
-
-            total_loss += loss.item()
-
-    average_loss = total_loss / min(len(dataloader), num_batches)
-    logger.info(f"Validation Subset Loss: {average_loss:.4f}")
-    return average_loss
-
-
-def calculate_val_loss(model, dataloader, device, logger):
-    model.eval()
-    total_loss = 0.0
-    with torch.no_grad():
-        for batch in dataloader:
-            input_ids = batch["input_ids"].to(device)
-            target_ids = batch["target_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-
-            logits, loss = model(
-                input_ids, targets=target_ids, attention_mask=attention_mask
-            )
-
-            total_loss += loss.item()
-
-    average_loss = total_loss / len(dataloader)
-    logger.info(f"Full Validation Loss: {average_loss:.4f}")
-    return average_loss
-
-
-def train(
-    model,
-    train_dataloader,
-    val_dataloader,
-    optimizer,
-    scheduler,
-    device,
-    num_epochs,
-    logger,
-    timestamp,
-    val_interval=100,
-    save_interval=1000,
-    accumulation_steps=4,
-):
-
-    weights_dir = f"weights_{timestamp}"
-    os.makedirs(weights_dir, exist_ok=True)
-
-    global_step = 0
-
-    for epoch in range(num_epochs):
-        model.train()
-        epoch_loss = 0.0
-        accumulated_loss = 0.0
-        start_time = time.time()
-        optimizer.zero_grad()
-
-        for batch_idx, batch in enumerate(train_dataloader):
-
-            input_ids = batch["input_ids"].to(device)
-            target_ids = batch["target_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-
-            logits, loss = model(
-                input_ids, targets=target_ids, attention_mask=attention_mask
-            )
-            unscaled_loss = loss.item()
-            loss = loss / accumulation_steps
-            loss.backward()
-
-            accumulated_loss += unscaled_loss
-
-            if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(
-                train_dataloader
-            ):
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-
-                global_step += 1
-
-                avg_loss = accumulated_loss / accumulation_steps
-                elapsed_time = time.time() - start_time
-                logger.info(
-                    f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_dataloader)}], Global Step [{global_step}], Avg Loss: {avg_loss:.6f}, LR: {scheduler.get_last_lr()[0]:.8f}, Time: {elapsed_time:.2f}s"
-                )
-
-                accumulated_loss = 0.0
-                start_time = time.time()
-
-                if global_step % val_interval == 0:
-                    logger.info(
-                        f"Running validation subset at Epoch {epoch+1}, Global Step {global_step}"
-                    )
-                    estimate_val_loss(model, val_dataloader, device, logger)
-
-                if global_step % save_interval == 0:
-                    weights_path = os.path.join(
-                        weights_dir, f"gpt2_sft_{epoch+1}_{global_step}.pt"
-                    )
-                    torch.save(model.state_dict(), weights_path)
-                    logger.info(f"Saved model weights to {weights_path}")
-
-        logger.info(
-            f"Epoch [{epoch+1}/{num_epochs}] completed. Average Loss: {epoch_loss / len(train_dataloader):.4f}"
-        )
-
-        logger.info(f"Starting full validation for Epoch {epoch+1}")
-        calculate_val_loss(model, val_dataloader, device, logger)
-
-
-def main():
-    logger, timestamp = setup_logger()
-
-    train_file = "train.jsonl"
-    test_file = "test.jsonl"
-    pretrained_weights = "gpt2.pt"
-    block_size = 1024
-    batch_size = 8
-    learning_rate = 5e-5
-    num_epochs = 3
-    accumulation_steps = 4
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device}")
-
-    train_dataset = SupervisedFineTuningDataset(train_file, block_size=block_size)
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn
-    )
-
-    val_dataset = SupervisedFineTuningDataset(test_file, block_size=block_size)
-    val_dataloader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
-    )
-
-    config = GPTConfig()
+    config = GPTConfig(dropout=dropout)
     model = GPT(config).to(device)
 
-    if pretrained_weights:
-        state_dict = torch.load(pretrained_weights, map_location="cpu")
-        state_dict_transposed = transpose_specific_layers(state_dict)
-        model.load_state_dict(state_dict_transposed, strict=False)
+    if init_path:
+        state = torch.load(init_path, map_location="cpu")
+        model.load_state_dict(state, strict=False)
 
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-
-    total_global_steps = (len(train_dataloader) // accumulation_steps) * num_epochs
-    scheduler = CosineAnnealingLR(optimizer, T_max=total_global_steps)
-
-    train(
-        model,
-        train_dataloader,
-        val_dataloader,
-        optimizer,
-        scheduler,
-        device,
-        num_epochs,
-        logger,
-        timestamp,
-        val_interval=100,
-        save_interval=1000,
-        accumulation_steps=accumulation_steps,
+    dataset = SupervisedDataset(data_path, block_size=config.block_size)
+    bundle = build_tokenizer()
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=lambda batch: collate_supervised(batch, bundle.pad),
     )
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
+
+    total_steps = epochs * math.ceil(len(loader) / accum)
+    step = 0
+
+    model.train()
+    for epoch in range(epochs):
+        for batch in loader:
+            inputs = batch["input_ids"].to(device)
+            targets = batch["target_ids"].to(device)
+            mask = batch["attention_mask"].to(device).to(inputs.dtype)
+
+            logits, _ = model(inputs, attention_mask=mask)
+            loss = supervised_loss(logits, targets, mask) / accum
+            loss.backward()
+
+            if (step + 1) % accum == 0:
+                lr_now = cosine_schedule(step // accum, total_steps, lr, warmup)
+                for g in optimizer.param_groups:
+                    g["lr"] = lr_now
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+            step += 1
+
+        if step % accum != 0:
+            grad_step = step // accum
+            lr_now = cosine_schedule(grad_step, total_steps, lr, warmup)
+            for g in optimizer.param_groups:
+                g["lr"] = lr_now
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
+            step = (grad_step + 1) * accum
+
+        os.makedirs(out_dir, exist_ok=True)
+        fname = os.path.join(out_dir, f"sft_epoch_{epoch+1}.pt")
+        torch.save(model.state_dict(), fname)
 
 
 if __name__ == "__main__":
-    main()
+    DATA_PATH = "data/sft_train.jsonl"
+    OUT_DIR = "weights"
+    BATCH_SIZE = 4
+    LEARNING_RATE = 5e-5
+    EPOCHS = 1
+    ACCUM = 1
+    WARMUP = 100
+    INIT_PATH = None
+    DROPOUT = 0.0
+
+    if not os.path.exists(DATA_PATH):
+        raise FileNotFoundError(
+            f"Supervised data not found at {DATA_PATH}. Update the path before running."
+        )
+
+    train_sft(
+        DATA_PATH,
+        out_dir=OUT_DIR,
+        batch_size=BATCH_SIZE,
+        lr=LEARNING_RATE,
+        epochs=EPOCHS,
+        accum=ACCUM,
+        warmup=WARMUP,
+        init_path=INIT_PATH,
+        dropout=DROPOUT,
+    )
