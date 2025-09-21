@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import time
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -11,9 +12,7 @@ from torch.utils.data import DataLoader
 
 from data import PreferenceDataset, collate_preferences
 from gpt import GPT, GPTConfig
-
-if TYPE_CHECKING:
-    from simple_logger import TrainingLogger
+from simple_logger import TrainingLogger
 
 
 class ScalarHead(nn.Module):
@@ -100,3 +99,81 @@ def train_reward_model(
                         "step_time": elapsed,
                     }
                 )
+
+
+def run_reward_model_training(
+    data_path: str,
+    *,
+    out_path: str,
+    batch_size: int = 8,
+    epochs: int = 1,
+    lr: float = 1e-5,
+    dropout: float = 0.0,
+    init_path: Optional[str] = None,
+    device: Optional[torch.device] = None,
+) -> str:
+    """Train a scalar reward model on preference data and persist the weights."""
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(
+            f"Preference data not found at {data_path}. Prepare the JSONL file before training."
+        )
+
+    config = GPTConfig(dropout=dropout)
+    model = ScalarHead(config)
+
+    if init_path:
+        state = torch.load(init_path, map_location="cpu")
+        model.load_state_dict(state, strict=False)
+
+    dataset = PreferenceDataset(data_path, block_size=config.block_size)
+    if os.path.dirname(out_path):
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    logger = TrainingLogger("rm")
+    try:
+        train_reward_model(
+            model.to(device),
+            dataset,
+            batch_size=batch_size,
+            epochs=epochs,
+            lr=lr,
+            device=device,
+            logger=logger,
+        )
+    finally:
+        logger.close()
+
+    torch.save(model.state_dict(), out_path)
+    return out_path
+
+
+def main() -> None:
+    # Edit the configuration below and run ``python train_rm.py`` to launch training.
+    data_path = "data/hh_rlhf_preferences_train.jsonl"
+    out_path = "weights/reward_model.pt"
+    batch_size = 8
+    epochs = 1
+    lr = 1e-5
+    dropout = 0.0
+    init_path = None
+    device_spec = None  # e.g. "cuda" or "cpu"; defaults to CUDA when available
+
+    device = torch.device(device_spec) if device_spec else None
+    run_reward_model_training(
+        data_path,
+        out_path=out_path,
+        batch_size=batch_size,
+        epochs=epochs,
+        lr=lr,
+        dropout=dropout,
+        init_path=init_path,
+        device=device,
+    )
+
+
+if __name__ == "__main__":
+    main()
