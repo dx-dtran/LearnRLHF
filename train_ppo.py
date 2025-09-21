@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from data import PreferenceDataset
 from gpt import GPT, GPTConfig
-from reward_model import ScalarHead, train_reward_model
+from train_rm import ScalarHead, train_reward_model
 from simple_logger import TrainingLogger
 
 
