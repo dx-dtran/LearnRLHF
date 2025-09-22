@@ -353,10 +353,10 @@ def train_ppo(
 def main() -> None:
     preference_path = "data/hh_rlhf_preferences_train.jsonl"
     reward_path = "weights/reward_model.pt"
-    policy_init = None
+    policy_init = "weights/sft.pt"
     out_path = "weights/ppo_policy.pt"
-    batch_size = 4
-    epochs = 1
+    batch_size = 8
+    epochs = 4
     max_new_tokens = 64
     lr = 1e-5
     clip = 0.2
