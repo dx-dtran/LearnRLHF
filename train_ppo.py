@@ -4,11 +4,28 @@ import os
 from typing import Optional
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from data import PreferenceDataset
 from gpt import GPT, GPTConfig
 from train_rm import ScalarHead
+
+
+class ValueHead(nn.Module):
+    """Lightweight value projection sharing the policy transformer."""
+
+    def __init__(self, hidden_size: int) -> None:
+        super().__init__()
+        self.proj = nn.Linear(hidden_size, 1, bias=False)
+
+    def forward(self, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        if hidden.size(0) == 0:
+            return hidden.new_zeros((0,))
+        lengths = mask.sum(dim=1).long().clamp(min=1) - 1
+        batch_indices = torch.arange(hidden.size(0), device=hidden.device)
+        last_hidden = hidden[batch_indices, lengths]
+        return self.proj(last_hidden).squeeze(-1)
 
 
 def _pad_batch(seqs: list[torch.Tensor], pad_token: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -52,7 +69,7 @@ class PPOTrainer:
         self,
         policy: GPT,
         reference: GPT,
-        value: ScalarHead,
+        value_head: ValueHead,
         reward: ScalarHead,
         pad_token: int,
         clip: float = 0.2,
@@ -62,7 +79,7 @@ class PPOTrainer:
     ) -> None:
         self.policy = policy
         self.reference = reference
-        self.value = value
+        self.value_head = value_head
         self.reward = reward
         self.pad = pad_token
         self.clip = clip
@@ -75,7 +92,9 @@ class PPOTrainer:
             param.requires_grad_(False)
 
         self.policy_opt = torch.optim.AdamW(self.policy.parameters(), lr=lr)
-        self.value_opt = torch.optim.AdamW(self.value.parameters(), lr=lr)
+
+    def compute_values(self, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        return self.value_head(hidden, mask)
 
     def compute_policy_losses(
         self,
@@ -121,7 +140,8 @@ class PPOTrainer:
         rewards = batch["rewards"]
         response_mask = batch["response_mask"]
 
-        logits, _ = self.policy(full, attention_mask=full_mask)
+        hidden = self.policy.transform(full, attention_mask=full_mask)
+        logits = self.policy.head(hidden)
         log_probs = F.log_softmax(logits, dim=-1)
         with torch.no_grad():
             ref_logits, _ = self.reference(full, attention_mask=full_mask)
@@ -140,20 +160,19 @@ class PPOTrainer:
         )
 
         policy_objective = policy_loss + self.kl * kl - self.entropy * entropy
+        predicted_values = self.compute_values(hidden, full_mask)
+        target_values = rewards.to(predicted_values.device)
+        value_loss = torch.nn.functional.mse_loss(predicted_values, target_values)
+
+        total_loss = policy_objective + value_loss
         self.policy_opt.zero_grad()
-        policy_objective.backward()
+        total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
         self.policy_opt.step()
 
-        predicted_values = self.value(full, full_mask)
-        target_values = rewards.to(predicted_values.device)
-        value_loss = torch.nn.functional.mse_loss(predicted_values, target_values)
-        self.value_opt.zero_grad()
-        value_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.value.parameters(), 1.0)
-        self.value_opt.step()
-
-        improvement = (predicted_values - old_values.to(predicted_values.device)).mean()
+        improvement = (
+            predicted_values.detach() - old_values.to(predicted_values.device)
+        ).mean()
 
         return {
             "policy_loss": float(policy_loss.item()),
@@ -215,7 +234,8 @@ def _prepare_sample_batch(
     response_lengths_tensor = torch.tensor(response_lengths, device=device, dtype=torch.long)
 
     with torch.no_grad():
-        logits, _ = trainer.policy(full_tokens, attention_mask=full_mask)
+        hidden = trainer.policy.transform(full_tokens, attention_mask=full_mask)
+        logits = trainer.policy.head(hidden)
         log_probs = F.log_softmax(logits, dim=-1)
         old_log_probs = gather_log_probs(
             log_probs,
@@ -223,7 +243,7 @@ def _prepare_sample_batch(
             prompt_lengths_tensor,
             response_lengths_tensor,
         )
-        old_values = trainer.value(full_tokens, full_mask)
+        old_values = trainer.compute_values(hidden, full_mask)
 
     return {
         "full": full_tokens,
@@ -274,23 +294,21 @@ def train_ppo(
     config = GPTConfig()
     policy = GPT(config)
     reference = GPT(config)
-    value_model = ScalarHead(config)
     reward_model = ScalarHead(config)
 
     if policy_init:
         state = torch.load(policy_init, map_location="cpu")
         policy.load_state_dict(state, strict=False)
         reference.load_state_dict(state, strict=False)
-        value_model.body.load_state_dict(state, strict=False)
-
     reference.load_state_dict(policy.state_dict())
-    value_model.body.load_state_dict(policy.state_dict(), strict=False)
     reward_state = torch.load(reward_path, map_location="cpu")
     reward_model.load_state_dict(reward_state, strict=False)
 
+    value_head = ValueHead(config.n_embd)
+    policy.add_module("value_head", value_head)
+
     policy.to(device)
     reference.to(device)
-    value_model.to(device)
     reward_model.to(device)
 
     dataset = PreferenceDataset(preference_path, block_size=config.block_size)
@@ -299,7 +317,7 @@ def train_ppo(
     trainer = PPOTrainer(
         policy,
         reference,
-        value_model,
+        value_head,
         reward_model,
         pad_token=bundle.pad,
         clip=clip,
