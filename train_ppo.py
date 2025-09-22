@@ -8,23 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from data import PreferenceDataset
-from gpt import GPT, GPTConfig, maybe_transpose_gpt_state_dict
+from gpt import GPT, GPTConfig
 from train_rm import ScalarHead
-
-
-
-def _resolve_policy_state(init_checkpoint: Optional[str]) -> tuple[GPTConfig, dict | None]:
-    config = GPTConfig()
-    state = None
-    if init_checkpoint:
-        if not os.path.exists(init_checkpoint):
-            raise FileNotFoundError(
-                f"Initial policy checkpoint {init_checkpoint} does not exist; provide a Torch state dict"
-            )
-        state = torch.load(init_checkpoint, map_location="cpu")
-        state = maybe_transpose_gpt_state_dict(state)
-    return config, state
-
 
 class ValueHead(nn.Module):
     """Lightweight value projection sharing the policy transformer."""
@@ -304,7 +289,7 @@ def train_ppo(
             f"Reward model weights not found at {reward_path}. Train the reward model first."
         )
 
-    config, policy_state = _resolve_policy_state(policy_init)
+    config = GPTConfig()
     dataset = PreferenceDataset(preference_path, block_size=config.block_size)
     bundle = dataset.bundle
     if bundle.encoder.n_vocab != config.vocab_size:
@@ -316,12 +301,16 @@ def train_ppo(
     reference = GPT(config)
     reward_model = ScalarHead(config)
 
-    if policy_state is not None:
+    if policy_init is not None:
+        if not os.path.exists(policy_init):
+            raise FileNotFoundError(
+                f"Initial policy checkpoint {policy_init} does not exist; provide a Torch state dict"
+            )
+        policy_state = torch.load(policy_init, map_location="cpu")
         policy.load_state_dict(policy_state, strict=False)
 
     reference.load_state_dict(policy.state_dict())
     reward_state = torch.load(reward_path, map_location="cpu")
-    reward_state = maybe_transpose_gpt_state_dict(reward_state)
     reward_model.load_state_dict(reward_state, strict=False)
 
     value_head = ValueHead(config.n_embd)
