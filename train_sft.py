@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from data import SupervisedDataset, collate_supervised
-from gpt import GPT, GPTConfig
+from gpt import GPT, GPTConfig, maybe_transpose_gpt_state_dict
 
 
 def supervised_loss(
@@ -34,6 +34,19 @@ def supervised_loss(
     return (per_token * flat_mask).sum() / denom
 
 
+def _resolve_initial_state(init_checkpoint: Optional[str]) -> tuple[GPTConfig, dict | None]:
+    config = GPTConfig()
+    state = None
+    if init_checkpoint:
+        if not os.path.exists(init_checkpoint):
+            raise FileNotFoundError(
+                f"Initial checkpoint {init_checkpoint} does not exist; provide a Torch state dict"
+            )
+        state = torch.load(init_checkpoint, map_location="cpu")
+        state = maybe_transpose_gpt_state_dict(state)
+    return config, state
+
+
 def train_sft(
     data_path: str,
     *,
@@ -42,7 +55,7 @@ def train_sft(
     lr: float = 5e-5,
     epochs: int = 3,
     grad_accumulation_steps: int = 1,
-    init_path: Optional[str] = "weights/gpt2.pt",
+    init_path: Optional[str] = None,
     device: Optional[torch.device] = None,
 ) -> str:
     if device is None:
@@ -53,15 +66,17 @@ def train_sft(
             f"Supervised data not found at {data_path}. Prepare the JSONL file before training."
         )
 
-    config = GPTConfig()
-    model = GPT(config).to(device)
-
-    if init_path:
-        state = torch.load(init_path, map_location="cpu")
-        model.load_state_dict(state, strict=False)
-
+    config, state = _resolve_initial_state(init_path)
     dataset = SupervisedDataset(data_path, block_size=config.block_size)
     bundle = dataset.bundle
+    if bundle.encoder.n_vocab != config.vocab_size:
+        if bundle.encoder.n_vocab > config.vocab_size:
+            raise ValueError("Tokenizer vocabulary is larger than the model embedding size")
+        config.vocab_size = bundle.encoder.n_vocab
+
+    model = GPT(config).to(device)
+    if state is not None:
+        model.load_state_dict(state, strict=False)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -134,7 +149,7 @@ def main() -> None:
     batch_size = 8
     lr = 5e-5
     epochs = 3
-    init_path = "weights/gpt2.pt"
+    init_path = None
     grad_accumulation_steps = 1
     device = None
 

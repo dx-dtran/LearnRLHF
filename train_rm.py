@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from data import PreferenceDataset, collate_preferences
-from gpt import GPT, GPTConfig
+from gpt import GPT, GPTConfig, maybe_transpose_gpt_state_dict
 
 
 class ScalarHead(nn.Module):
@@ -26,6 +26,21 @@ class ScalarHead(nn.Module):
 
 def preference_loss(chosen: torch.Tensor, rejected: torch.Tensor) -> torch.Tensor:
     return -torch.nn.functional.logsigmoid(chosen - rejected).mean()
+
+
+def _resolve_gpt_config(
+    init_checkpoint: Optional[str], dropout: float
+) -> tuple[GPTConfig, dict | None]:
+    config = GPTConfig(dropout=dropout)
+    state = None
+    if init_checkpoint:
+        if not os.path.exists(init_checkpoint):
+            raise FileNotFoundError(
+                f"Initial checkpoint {init_checkpoint} does not exist; provide a Torch state dict"
+            )
+        state = torch.load(init_checkpoint, map_location="cpu")
+        state = maybe_transpose_gpt_state_dict(state)
+    return config, state
 
 
 def train_reward_model(
@@ -48,11 +63,17 @@ def train_reward_model(
             f"Preference data not found at {data_path}. Prepare the JSONL file before training."
         )
 
-    config = GPTConfig(dropout=dropout)
+    config, state = _resolve_gpt_config(init_path, dropout)
+    dataset = PreferenceDataset(data_path, block_size=config.block_size)
+    bundle = dataset.bundle
+    if bundle.encoder.n_vocab != config.vocab_size:
+        if bundle.encoder.n_vocab > config.vocab_size:
+            raise ValueError("Tokenizer vocabulary is larger than the model embedding size")
+        config.vocab_size = bundle.encoder.n_vocab
+
     model = ScalarHead(config)
 
-    if init_path:
-        state = torch.load(init_path, map_location="cpu")
+    if state is not None:
         if not any(key.startswith("body.") for key in state.keys()):
             remapped_state = {}
             for key, value in state.items():
@@ -68,9 +89,6 @@ def train_reward_model(
                     remapped_state[key] = value
             state = remapped_state
         model.load_state_dict(state, strict=False)
-
-    dataset = PreferenceDataset(data_path, block_size=config.block_size)
-    bundle = dataset.bundle
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
