@@ -319,10 +319,6 @@ def train_ppo(
     if policy_state is not None:
         policy.load_state_dict(policy_state, strict=False)
 
-    if policy_init:
-        state = torch.load(policy_init, map_location="cpu")
-        reference.load_state_dict(state, strict=False)
-
     reference.load_state_dict(policy.state_dict())
     reward_state = torch.load(reward_path, map_location="cpu")
     reward_state = maybe_transpose_gpt_state_dict(reward_state)

@@ -191,31 +191,45 @@ _TRANSPOSE_SUFFIXES = (
 )
 
 
+def _should_transpose(key: str, value: torch.Tensor, state_dict: MutableMapping[str, torch.Tensor]) -> bool:
+    if value.ndim != 2 or not any(key.endswith(suffix) for suffix in _TRANSPOSE_SUFFIXES):
+        return False
+
+    bias_key = key[:-6] + "bias"
+    bias = state_dict.get(bias_key)
+    if bias is None or bias.ndim != 1:
+        return False
+
+    expected_out = bias.shape[0]
+    if value.shape[0] == expected_out:
+        return False
+    if value.shape[1] == expected_out:
+        return True
+    return False
+
+
 def maybe_transpose_gpt_state_dict(
     state_dict: MutableMapping[str, torch.Tensor],
 ) -> MutableMapping[str, torch.Tensor]:
     """Transpose legacy GPT-2 weight matrices to match the current module layout."""
 
-    needs_transpose = False
-    for key, value in state_dict.items():
-        if value.ndim != 2:
-            continue
-        if any(key.endswith(suffix) for suffix in _TRANSPOSE_SUFFIXES):
-            needs_transpose = True
-            break
+    keys_to_transpose = {
+        key
+        for key, value in state_dict.items()
+        if _should_transpose(key, value, state_dict)
+    }
 
-    if not needs_transpose:
+    if not keys_to_transpose:
         return state_dict
 
+    new_state: MutableMapping[str, torch.Tensor]
     if isinstance(state_dict, OrderedDict):
-        items = state_dict.items()
         new_state = OrderedDict()
     else:
-        items = state_dict.items()
         new_state = {}
 
-    for key, value in items:
-        if value.ndim == 2 and any(key.endswith(suffix) for suffix in _TRANSPOSE_SUFFIXES):
+    for key, value in state_dict.items():
+        if key in keys_to_transpose:
             new_state[key] = value.transpose(0, 1)
         else:
             new_state[key] = value
