@@ -59,10 +59,12 @@ def load_jsonl(path: str | Path) -> Iterable[dict]:
                 yield json.loads(line)
 
 
-def _split_into_sequences(tokens: list[int], block_size: int) -> Iterable[list[int]]:
+def _split_into_sequences(
+    tokens: list[int], block_size: int
+) -> Iterable[tuple[int, list[int]]]:
     step = block_size + 1
     for start in range(0, max(0, len(tokens) - 1), block_size):
-        yield tokens[start : start + step]
+        yield start, tokens[start : start + step]
 
 
 class SupervisedDataset(Dataset):
@@ -77,24 +79,31 @@ class SupervisedDataset(Dataset):
     def __init__(self, path: str | Path, block_size: int) -> None:
         self.bundle = build_tokenizer()
         self.block_size = block_size
-        self.data: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.data: list[tuple[torch.Tensor, torch.Tensor, int]] = []
 
         for row in load_jsonl(path):
             prompt = row.get("prompt", "")
             answer = row.get("chosen", row.get("response", ""))
-            text = prompt + answer
-            tokens = [self.bundle.bos] + self.bundle.encode(text) + [self.bundle.eos]
-            for chunk in _split_into_sequences(tokens, block_size):
+            prompt_tokens = [self.bundle.bos] + self.bundle.encode(prompt)
+            prompt_length = len(prompt_tokens)
+            tokens = prompt_tokens + self.bundle.encode(answer) + [self.bundle.eos]
+            for start, chunk in _split_into_sequences(tokens, block_size):
                 if len(chunk) < 2:
                     continue
                 x_tokens = torch.tensor(chunk[:-1], dtype=torch.long)
                 y_tokens = torch.tensor(chunk[1:], dtype=torch.long)
-                self.data.append((x_tokens, y_tokens))
+                first_target_idx = start + 1
+                chunk_end = start + len(chunk)
+                prompt_in_chunk = 0
+                if first_target_idx < prompt_length:
+                    prompt_in_chunk = min(prompt_length, chunk_end) - first_target_idx
+                    prompt_in_chunk = max(prompt_in_chunk, 0)
+                self.data.append((x_tokens, y_tokens, int(prompt_in_chunk)))
 
     def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, int]:
         return self.data[index]
 
 
@@ -145,13 +154,31 @@ def _pad_sequences(seqs: list[torch.Tensor], pad_value: int) -> tuple[torch.Tens
     return batch, mask
 
 
-def collate_supervised(batch: list[tuple[torch.Tensor, torch.Tensor]], pad_token: int) -> dict[str, torch.Tensor]:
-    inputs, targets = zip(*batch)
-    x, mask = _pad_sequences(list(inputs), pad_token)
+def collate_supervised(
+    batch: list[tuple[torch.Tensor, torch.Tensor, int]], pad_token: int
+) -> dict[str, torch.Tensor]:
+    inputs, targets, prompt_lengths = zip(*batch)
+    x, attention_mask = _pad_sequences(list(inputs), pad_token)
     y, _ = _pad_sequences(list(targets), -1)
     y = y.long()
-    y[mask == 0] = -1
-    return {"input_ids": x, "target_ids": y, "attention_mask": mask}
+    y[attention_mask == 0] = -1
+
+    label_masks: list[torch.Tensor] = []
+    for target, prompt_len in zip(targets, prompt_lengths):
+        seq_len = target.size(0)
+        prompt_len = min(prompt_len, seq_len)
+        label_mask = torch.zeros(seq_len, dtype=torch.long)
+        if prompt_len < seq_len:
+            label_mask[prompt_len:] = 1
+        label_masks.append(label_mask)
+    label_mask, _ = _pad_sequences(label_masks, 0)
+
+    return {
+        "input_ids": x,
+        "target_ids": y,
+        "attention_mask": attention_mask,
+        "label_mask": label_mask,
+    }
 
 
 def collate_preferences(batch: list[dict[str, torch.Tensor]], pad_token: int) -> dict[str, torch.Tensor]:

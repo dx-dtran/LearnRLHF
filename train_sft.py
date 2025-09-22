@@ -8,10 +8,12 @@ from data import SupervisedDataset, collate_supervised
 from gpt import GPT, GPTConfig, maybe_transpose_gpt_state_dict
 
 
-def supervised_loss(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Cross entropy between ``logits`` and ``targets`` masked on padding.
+def supervised_loss(
+    logits: torch.Tensor, targets: torch.Tensor, label_mask: torch.Tensor
+) -> torch.Tensor:
+    """Cross entropy between ``logits`` and ``targets`` masked on labels.
 
-    The mask marks the valid positions inside each sequence.  ``targets`` is the
+    The mask marks the valid label positions inside each sequence.  ``targets`` is the
     input sequence shifted by one position which makes the language modelling
     objective explicit: the model learns to predict the next token ``y`` from the
     observed prefix ``x``.
@@ -20,7 +22,7 @@ def supervised_loss(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Ten
     vocab = logits.size(-1)
     flat_logits = logits.view(-1, vocab)
     flat_targets = targets.view(-1)
-    flat_mask = mask.view(-1).to(logits.dtype)
+    flat_mask = label_mask.view(-1).to(logits.dtype)
 
     per_token = torch.nn.functional.cross_entropy(
         flat_logits,
@@ -96,14 +98,15 @@ def train_sft(
         for batch in loader:
             tokens = batch["input_ids"].to(device)
             targets = batch["target_ids"].to(device)
-            mask = batch["attention_mask"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            label_mask = batch["label_mask"].to(device)
 
-            logits, _ = model(tokens, attention_mask=mask)
-            loss = supervised_loss(logits, targets, mask)
+            logits, _ = model(tokens, attention_mask=attention_mask)
+            loss = supervised_loss(logits, targets, label_mask)
 
             with torch.no_grad():
                 predictions = logits.argmax(dim=-1)
-                valid = (targets != -1) & mask.bool()
+                valid = (targets != -1) & label_mask.bool()
                 correct_tokens += (predictions.eq(targets) & valid).sum().item()
                 total_tokens += valid.sum().item()
                 running_loss += loss.item()
