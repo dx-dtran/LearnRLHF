@@ -11,7 +11,7 @@ sys.path.append(ROOT)
 
 from gpt import GPTConfig, GPT
 from train_rm import ScalarHead
-from train_ppo import PPOTrainer, _prepare_sample_batch, gather_log_probs
+from train_ppo import PPOTrainer, ValueHead, _prepare_sample_batch, gather_log_probs
 from train_ppo import train_ppo  # noqa: F401  # ensure module imports without argparse
 
 
@@ -19,12 +19,14 @@ def build_models():
     config = GPTConfig(vocab_size=64, block_size=16, n_layer=1, n_head=2, n_embd=16, dropout=0.0)
     policy = GPT(config)
     reference = GPT(config)
-    value = ScalarHead(config)
     reward = ScalarHead(config)
     reference.load_state_dict(policy.state_dict())
-    value.body.load_state_dict(policy.state_dict())
     reward.body.load_state_dict(policy.state_dict())
-    return config, policy, reference, value, reward
+
+    value_head = ValueHead(config.n_embd)
+    policy.add_module("value_head", value_head)
+
+    return config, policy, reference, value_head, reward
 
 
 def test_ppo_step_runs():
@@ -35,7 +37,7 @@ def test_ppo_step_runs():
     prompt_len = 4
     response_len = 3
     full = torch.randint(0, config.vocab_size, (batch, prompt_len + response_len))
-    mask = torch.ones_like(full)
+    mask = torch.ones_like(full, dtype=torch.float32)
     response_mask = torch.zeros_like(full)
     response_mask[:, prompt_len:] = 1
     responses = full[:, prompt_len:]
@@ -44,12 +46,13 @@ def test_ppo_step_runs():
     response_lengths = torch.full((batch,), response_len)
 
     with torch.no_grad():
-        logits, _ = policy(full, attention_mask=mask)
+        hidden = trainer.policy.transform(full, attention_mask=mask)
+        logits = trainer.policy.head(hidden)
         log_probs = F.log_softmax(logits, dim=-1)
         old_log_probs = gather_log_probs(
             log_probs, responses, prompt_lengths, response_lengths
         )
-        old_values = value(full, mask)
+        old_values = trainer.compute_values(hidden, mask)
 
     rewards = torch.randn(batch)
     advantages = torch.randn(batch)
