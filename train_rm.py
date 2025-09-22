@@ -32,12 +32,12 @@ def train_reward_model(
     data_path: str,
     *,
     out_path: str,
-    batch_size: int = 8,
-    epochs: int = 1,
+    batch_size: int = 12,
+    epochs: int = 3,
     lr: float = 1e-5,
     dropout: float = 0.0,
     grad_accumulation_steps: int = 1,
-    init_path: Optional[str] = None,
+    init_path: Optional[str] = "weights/sft.pt",
     device: Optional[torch.device] = None,
 ) -> str:
     if device is None:
@@ -53,6 +53,20 @@ def train_reward_model(
 
     if init_path:
         state = torch.load(init_path, map_location="cpu")
+        if not any(key.startswith("body.") for key in state.keys()):
+            remapped_state = {}
+            for key, value in state.items():
+                if key.startswith((
+                    "token_embed",
+                    "position_embed",
+                    "blocks",
+                    "ln",
+                    "head",
+                )):
+                    remapped_state[f"body.{key}"] = value
+                else:
+                    remapped_state[key] = value
+            state = remapped_state
         model.load_state_dict(state, strict=False)
 
     dataset = PreferenceDataset(data_path, block_size=config.block_size)
@@ -70,9 +84,12 @@ def train_reward_model(
     if grad_accumulation_steps < 1:
         raise ValueError("grad_accumulation_steps must be a positive integer")
 
-    for _ in range(epochs):
+    for epoch_idx in range(epochs):
         optimizer.zero_grad()
         step_in_epoch = 0
+        running_loss = 0.0
+        preference_correct = 0
+        preference_total = 0
         for batch in loader:
             chosen = batch["chosen"].to(device)
             chosen_mask = batch["chosen_mask"].to(device)
@@ -82,6 +99,11 @@ def train_reward_model(
             chosen_scores = model(chosen, chosen_mask)
             rejected_scores = model(rejected, rejected_mask)
             loss = preference_loss(chosen_scores, rejected_scores)
+
+            with torch.no_grad():
+                preference_correct += (chosen_scores > rejected_scores).sum().item()
+                preference_total += chosen_scores.size(0)
+                running_loss += loss.item()
 
             (loss / grad_accumulation_steps).backward()
             step_in_epoch += 1
@@ -101,6 +123,13 @@ def train_reward_model(
             optimizer.step()
             optimizer.zero_grad()
 
+        average_loss = running_loss / max(step_in_epoch, 1)
+        accuracy = preference_correct / max(preference_total, 1)
+        print(
+            f"Epoch {epoch_idx + 1}/{epochs}: loss={average_loss:.4f}, "
+            f"preference_accuracy={accuracy:.4f}"
+        )
+
     if os.path.dirname(out_path):
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
     torch.save(model.state_dict(), out_path)
@@ -110,11 +139,11 @@ def train_reward_model(
 def main() -> None:
     data_path = "data/hh_rlhf_preferences_train.jsonl"
     out_path = "weights/reward_model.pt"
-    batch_size = 8
-    epochs = 1
+    batch_size = 12
+    epochs = 3
     lr = 1e-5
     dropout = 0.0
-    init_path = None
+    init_path = "weights/sft.pt"
     grad_accumulation_steps = 1
     device = None
 
