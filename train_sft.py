@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from data import SupervisedDataset, collate_supervised
-from gpt import GPT, GPTConfig, maybe_transpose_gpt_state_dict
+from gpt import GPT, GPTConfig
 
 
 def supervised_loss(
@@ -34,19 +34,6 @@ def supervised_loss(
     return (per_token * flat_mask).sum() / denom
 
 
-def _resolve_initial_state(init_checkpoint: Optional[str]) -> tuple[GPTConfig, dict | None]:
-    config = GPTConfig()
-    state = None
-    if init_checkpoint:
-        if not os.path.exists(init_checkpoint):
-            raise FileNotFoundError(
-                f"Initial checkpoint {init_checkpoint} does not exist; provide a Torch state dict"
-            )
-        state = torch.load(init_checkpoint, map_location="cpu")
-        state = maybe_transpose_gpt_state_dict(state)
-    return config, state
-
-
 def train_sft(
     data_path: str,
     *,
@@ -66,7 +53,7 @@ def train_sft(
             f"Supervised data not found at {data_path}. Prepare the JSONL file before training."
         )
 
-    config, state = _resolve_initial_state(init_path)
+    config = GPTConfig()
     dataset = SupervisedDataset(data_path, block_size=config.block_size)
     bundle = dataset.bundle
     if bundle.encoder.n_vocab != config.vocab_size:
@@ -75,7 +62,12 @@ def train_sft(
         config.vocab_size = bundle.encoder.n_vocab
 
     model = GPT(config).to(device)
-    if state is not None:
+    if init_path is not None:
+        if not os.path.exists(init_path):
+            raise FileNotFoundError(
+                f"Initial checkpoint {init_path} does not exist; provide a Torch state dict"
+            )
+        state = torch.load(init_path, map_location="cpu")
         model.load_state_dict(state, strict=False)
     loader = DataLoader(
         dataset,

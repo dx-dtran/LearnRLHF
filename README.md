@@ -113,6 +113,14 @@ can either import and call it directly or edit the constants at the bottom of
 Both training scripts now assume single-GPU execution. Gradient accumulation is
 available through the shared `grad_accumulation_steps` argument.
 
+### Preparing legacy checkpoints
+
+If you are starting from a checkpoint that was saved with a different module
+layout (for example, raw GPT-2 weights from Hugging Face), run it through
+`scripts/format_checkpoint.py` once. The script transposes the older projection
+matrices and optionally adds a prefix before writing a clean `.pt` file that the
+trainers can load directly.
+
 ## Testing
 
 Unit tests (including gradient checks for both the SFT loss and the PPO policy objective) can be run with:
