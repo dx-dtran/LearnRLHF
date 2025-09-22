@@ -4,8 +4,13 @@ from typing import Optional
 import torch
 from torch.utils.data import DataLoader
 
-from data import SupervisedDataset, collate_supervised
-from gpt import GPT, GPTConfig
+from data import (
+    TokenizerBundle,
+    SupervisedDataset,
+    build_tokenizer,
+    collate_supervised,
+)
+from gpt import GPT, GPTConfig, load_gpt_checkpoint
 
 
 def supervised_loss(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -32,6 +37,29 @@ def supervised_loss(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Ten
     return (per_token * flat_mask).sum() / denom
 
 
+def _resolve_initial_state(
+    init_checkpoint: Optional[str], bundle: TokenizerBundle, block_size: int
+) -> tuple[GPTConfig, dict | None]:
+    config = GPTConfig(vocab_size=bundle.encoder.n_vocab, block_size=block_size)
+    state = None
+    if init_checkpoint:
+        if not os.path.exists(init_checkpoint):
+            raise FileNotFoundError(
+                f"Initial checkpoint {init_checkpoint} does not exist; provide a Torch state dict"
+            )
+        config, state = load_gpt_checkpoint(init_checkpoint)
+        if config.vocab_size != bundle.encoder.n_vocab:
+            raise ValueError(
+                "Tokenizer vocabulary does not match the checkpoint embedding size"
+            )
+        if block_size > config.block_size:
+            raise ValueError(
+                "Requested block_size exceeds the positional embeddings in the checkpoint"
+            )
+        config.block_size = min(block_size, config.block_size)
+    return config, state
+
+
 def train_sft(
     data_path: str,
     *,
@@ -40,7 +68,8 @@ def train_sft(
     lr: float = 5e-5,
     epochs: int = 3,
     grad_accumulation_steps: int = 1,
-    init_path: Optional[str] = "weights/gpt2.pt",
+    init_path: Optional[str] = None,
+    block_size: int = 1024,
     device: Optional[torch.device] = None,
 ) -> str:
     if device is None:
@@ -51,15 +80,14 @@ def train_sft(
             f"Supervised data not found at {data_path}. Prepare the JSONL file before training."
         )
 
-    config = GPTConfig()
+    bundle = build_tokenizer()
+    config, state = _resolve_initial_state(init_path, bundle, block_size)
     model = GPT(config).to(device)
 
-    if init_path:
-        state = torch.load(init_path, map_location="cpu")
+    if state is not None:
         model.load_state_dict(state, strict=False)
 
-    dataset = SupervisedDataset(data_path, block_size=config.block_size)
-    bundle = dataset.bundle
+    dataset = SupervisedDataset(data_path, block_size=config.block_size, bundle=bundle)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -133,6 +161,7 @@ def main() -> None:
     epochs = 3
     init_path = "weights/gpt2.pt"
     grad_accumulation_steps = 1
+    block_size = 1024
     device = None
 
     device_obj = torch.device(device) if device else None
@@ -144,6 +173,7 @@ def main() -> None:
         epochs=epochs,
         grad_accumulation_steps=grad_accumulation_steps,
         init_path=init_path,
+        block_size=block_size,
         device=device_obj,
     )
 

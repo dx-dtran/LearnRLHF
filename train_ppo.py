@@ -6,8 +6,8 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-from data import PreferenceDataset
-from gpt import GPT, GPTConfig
+from data import PreferenceDataset, TokenizerBundle, build_tokenizer
+from gpt import GPT, GPTConfig, load_gpt_checkpoint
 from train_rm import ScalarHead
 
 
@@ -45,6 +45,42 @@ def gather_log_probs(
         log_slice = log_probs[i, start : start + length]
         collected[i, :length] = log_slice.gather(1, token_slice.unsqueeze(-1)).squeeze(-1)
     return collected
+
+
+def _load_policy_components(
+    init_checkpoint: Optional[str], bundle: TokenizerBundle, block_size: int
+) -> tuple[GPTConfig, GPT, GPT, ScalarHead]:
+    config = GPTConfig(vocab_size=bundle.encoder.n_vocab, block_size=block_size)
+    state = None
+    if init_checkpoint:
+        if not os.path.exists(init_checkpoint):
+            raise FileNotFoundError(
+                f"Initial checkpoint {init_checkpoint} does not exist; provide a Torch state dict"
+            )
+        loaded_config, loaded_state = load_gpt_checkpoint(init_checkpoint)
+        if loaded_config.vocab_size != bundle.encoder.n_vocab:
+            raise ValueError(
+                "Tokenizer vocabulary does not match the checkpoint embedding size"
+            )
+        if block_size > loaded_config.block_size:
+            raise ValueError(
+                "Requested block_size exceeds the positional embeddings in the checkpoint"
+            )
+        loaded_config.block_size = min(block_size, loaded_config.block_size)
+        config = loaded_config
+        state = loaded_state
+
+    policy = GPT(config)
+    reference = GPT(config)
+    value_model = ScalarHead(config)
+
+    if state is not None:
+        policy.load_state_dict(state, strict=False)
+
+    reference.load_state_dict(policy.state_dict())
+    value_model.body.load_state_dict(policy.state_dict(), strict=False)
+
+    return config, policy, reference, value_model
 
 
 class PPOTrainer:
@@ -257,6 +293,7 @@ def train_ppo(
     clip: float = 0.2,
     kl_coef: float = 0.1,
     entropy_coef: float = 0.01,
+    block_size: int = 1024,
     device: Optional[torch.device] = None,
 ) -> str:
     if device is None:
@@ -271,20 +308,11 @@ def train_ppo(
             f"Reward model weights not found at {reward_path}. Train the reward model first."
         )
 
-    config = GPTConfig()
-    policy = GPT(config)
-    reference = GPT(config)
-    value_model = ScalarHead(config)
+    bundle = build_tokenizer()
+    config, policy, reference, value_model = _load_policy_components(
+        policy_init, bundle, block_size
+    )
     reward_model = ScalarHead(config)
-
-    if policy_init:
-        state = torch.load(policy_init, map_location="cpu")
-        policy.load_state_dict(state, strict=False)
-        reference.load_state_dict(state, strict=False)
-        value_model.body.load_state_dict(state, strict=False)
-
-    reference.load_state_dict(policy.state_dict())
-    value_model.body.load_state_dict(policy.state_dict(), strict=False)
     reward_state = torch.load(reward_path, map_location="cpu")
     reward_model.load_state_dict(reward_state, strict=False)
 
@@ -293,8 +321,7 @@ def train_ppo(
     value_model.to(device)
     reward_model.to(device)
 
-    dataset = PreferenceDataset(preference_path, block_size=config.block_size)
-    bundle = dataset.bundle
+    dataset = PreferenceDataset(preference_path, block_size=config.block_size, bundle=bundle)
 
     trainer = PPOTrainer(
         policy,
@@ -362,6 +389,7 @@ def main() -> None:
     clip = 0.2
     kl_coef = 0.1
     entropy_coef = 0.01
+    block_size = 1024
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_ppo(
@@ -376,6 +404,7 @@ def main() -> None:
         clip=clip,
         kl_coef=kl_coef,
         entropy_coef=entropy_coef,
+        block_size=block_size,
         device=device,
     )
 

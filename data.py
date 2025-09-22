@@ -1,7 +1,8 @@
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 import torch
 from torch.utils.data import Dataset
@@ -21,21 +22,33 @@ class TokenizerBundle:
 
 
 def build_tokenizer() -> TokenizerBundle:
-    byte_tokens = {bytes([i]): i for i in range(256)}
-    bos_id = len(byte_tokens)
-    eos_id = bos_id + 1
-    pad_id = eos_id + 1
-    special_tokens = {"<|bos|>": bos_id, "<|eos|>": eos_id, "<|pad|>": pad_id}
-    enc = tiktoken.Encoding(
-        "byte-level-minimal",
-        pat_str=r"(?s).",
-        mergeable_ranks=byte_tokens,
-        special_tokens=special_tokens,
-    )
-    bos = special_tokens["<|bos|>"]
-    eos = special_tokens["<|eos|>"]
-    pad = special_tokens["<|pad|>"]
-    return TokenizerBundle(enc, bos, eos, pad)
+    try:
+        enc = tiktoken.get_encoding("gpt2")
+        bos = enc.eot_token
+        eos = enc.eot_token
+        pad = enc.eot_token
+        return TokenizerBundle(enc, bos, eos, pad)
+    except Exception as exc:  # pragma: no cover - fallback for offline environments
+        warnings.warn(
+            "Falling back to a minimal byte-level tokenizer because the GPT-2 "
+            f"encoding could not be loaded ({exc}).",
+            RuntimeWarning,
+        )
+        byte_tokens = {bytes([i]): i for i in range(256)}
+        bos_id = len(byte_tokens)
+        eos_id = bos_id + 1
+        pad_id = eos_id + 1
+        special_tokens = {"<|bos|>": bos_id, "<|eos|>": eos_id, "<|pad|>": pad_id}
+        enc = tiktoken.Encoding(
+            "byte-level-minimal",
+            pat_str=r"(?s).",
+            mergeable_ranks=byte_tokens,
+            special_tokens=special_tokens,
+        )
+        bos = special_tokens["<|bos|>"]
+        eos = special_tokens["<|eos|>"]
+        pad = special_tokens["<|pad|>"]
+        return TokenizerBundle(enc, bos, eos, pad)
 
 
 def load_jsonl(path: str | Path) -> Iterable[dict]:
@@ -61,8 +74,10 @@ class SupervisedDataset(Dataset):
     Andrej Karpathy's micro GPT implementations.
     """
 
-    def __init__(self, path: str | Path, block_size: int) -> None:
-        self.bundle = build_tokenizer()
+    def __init__(
+        self, path: str | Path, block_size: int, bundle: Optional[TokenizerBundle] = None
+    ) -> None:
+        self.bundle = bundle or build_tokenizer()
         self.block_size = block_size
         self.data: list[tuple[torch.Tensor, torch.Tensor]] = []
 
@@ -88,8 +103,10 @@ class SupervisedDataset(Dataset):
 class PreferenceDataset(Dataset):
     """Dataset used for training reward models and PPO."""
 
-    def __init__(self, path: str | Path, block_size: int) -> None:
-        self.bundle = build_tokenizer()
+    def __init__(
+        self, path: str | Path, block_size: int, bundle: Optional[TokenizerBundle] = None
+    ) -> None:
+        self.bundle = bundle or build_tokenizer()
         self.block_size = block_size
         self.rows: list[dict[str, torch.Tensor]] = []
 

@@ -5,8 +5,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from data import PreferenceDataset, collate_preferences
-from gpt import GPT, GPTConfig
+from data import (
+    TokenizerBundle,
+    PreferenceDataset,
+    build_tokenizer,
+    collate_preferences,
+)
+from gpt import GPT, GPTConfig, load_gpt_checkpoint
 
 
 class ScalarHead(nn.Module):
@@ -28,6 +33,43 @@ def preference_loss(chosen: torch.Tensor, rejected: torch.Tensor) -> torch.Tenso
     return -torch.nn.functional.logsigmoid(chosen - rejected).mean()
 
 
+def _resolve_initial_state(
+    init_checkpoint: Optional[str],
+    bundle: TokenizerBundle,
+    block_size: int,
+    dropout: float,
+) -> tuple[GPTConfig, dict | None]:
+    config = GPTConfig(
+        vocab_size=bundle.encoder.n_vocab,
+        block_size=block_size,
+        dropout=dropout,
+    )
+    state = None
+    if init_checkpoint:
+        if not os.path.exists(init_checkpoint):
+            raise FileNotFoundError(
+                f"Initial checkpoint {init_checkpoint} does not exist; provide a Torch state dict"
+            )
+        base_config, base_state = load_gpt_checkpoint(init_checkpoint)
+        if base_config.vocab_size != bundle.encoder.n_vocab:
+            raise ValueError(
+                "Tokenizer vocabulary does not match the checkpoint embedding size"
+            )
+        if block_size > base_config.block_size:
+            raise ValueError(
+                "Requested block_size exceeds the positional embeddings in the checkpoint"
+            )
+        base_config.block_size = min(block_size, base_config.block_size)
+        base_config.dropout = dropout
+        remapped_state: dict[str, torch.Tensor] = {}
+        for key, value in base_state.items():
+            if key.startswith(("token_embed", "position_embed", "blocks", "ln")):
+                remapped_state[f"body.{key}"] = value
+        state = remapped_state
+        config = base_config
+    return config, state
+
+
 def train_reward_model(
     data_path: str,
     *,
@@ -37,7 +79,8 @@ def train_reward_model(
     lr: float = 1e-5,
     dropout: float = 0.0,
     grad_accumulation_steps: int = 1,
-    init_path: Optional[str] = "weights/sft.pt",
+    init_path: Optional[str] = None,
+    block_size: int = 1024,
     device: Optional[torch.device] = None,
 ) -> str:
     if device is None:
@@ -48,29 +91,14 @@ def train_reward_model(
             f"Preference data not found at {data_path}. Prepare the JSONL file before training."
         )
 
-    config = GPTConfig(dropout=dropout)
+    bundle = build_tokenizer()
+    config, state = _resolve_initial_state(init_path, bundle, block_size, dropout)
     model = ScalarHead(config)
 
-    if init_path:
-        state = torch.load(init_path, map_location="cpu")
-        if not any(key.startswith("body.") for key in state.keys()):
-            remapped_state = {}
-            for key, value in state.items():
-                if key.startswith((
-                    "token_embed",
-                    "position_embed",
-                    "blocks",
-                    "ln",
-                    "head",
-                )):
-                    remapped_state[f"body.{key}"] = value
-                else:
-                    remapped_state[key] = value
-            state = remapped_state
+    if state is not None:
         model.load_state_dict(state, strict=False)
 
-    dataset = PreferenceDataset(data_path, block_size=config.block_size)
-    bundle = dataset.bundle
+    dataset = PreferenceDataset(data_path, block_size=config.block_size, bundle=bundle)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -130,21 +158,20 @@ def train_reward_model(
             f"preference_accuracy={accuracy:.4f}"
         )
 
-    if os.path.dirname(out_path):
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
     torch.save(model.state_dict(), out_path)
     return out_path
 
 
 def main() -> None:
-    data_path = "data/hh_rlhf_preferences_train.jsonl"
-    out_path = "weights/reward_model.pt"
+    data_path = "data/hh_rlhf_rm_train.jsonl"
+    out_path = "weights/rm.pt"
     batch_size = 12
     epochs = 3
     lr = 1e-5
     dropout = 0.0
-    init_path = "weights/sft.pt"
     grad_accumulation_steps = 1
+    init_path: Optional[str] = None
+    block_size = 1024
     device = None
 
     device_obj = torch.device(device) if device else None
@@ -157,6 +184,7 @@ def main() -> None:
         dropout=dropout,
         grad_accumulation_steps=grad_accumulation_steps,
         init_path=init_path,
+        block_size=block_size,
         device=device_obj,
     )
 
