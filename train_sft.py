@@ -36,11 +36,11 @@ def train_sft(
     data_path: str,
     *,
     out_dir: str = "weights",
-    batch_size: int = 4,
+    batch_size: int = 8,
     lr: float = 5e-5,
-    epochs: int = 1,
+    epochs: int = 3,
     grad_accumulation_steps: int = 1,
-    init_path: Optional[str] = None,
+    init_path: Optional[str] = "weights/gpt2.pt",
     device: Optional[torch.device] = None,
 ) -> str:
     if device is None:
@@ -72,9 +72,12 @@ def train_sft(
     if grad_accumulation_steps < 1:
         raise ValueError("grad_accumulation_steps must be a positive integer")
 
-    for _ in range(epochs):
+    for epoch_idx in range(epochs):
         optimizer.zero_grad()
         step_in_epoch = 0
+        running_loss = 0.0
+        total_tokens = 0
+        correct_tokens = 0
         for batch in loader:
             tokens = batch["input_ids"].to(device)
             targets = batch["target_ids"].to(device)
@@ -82,6 +85,13 @@ def train_sft(
 
             logits, _ = model(tokens, attention_mask=mask)
             loss = supervised_loss(logits, targets, mask)
+
+            with torch.no_grad():
+                predictions = logits.argmax(dim=-1)
+                valid = (targets != -1) & mask.bool()
+                correct_tokens += (predictions.eq(targets) & valid).sum().item()
+                total_tokens += valid.sum().item()
+                running_loss += loss.item()
 
             (loss / grad_accumulation_steps).backward()
             step_in_epoch += 1
@@ -101,6 +111,14 @@ def train_sft(
             optimizer.step()
             optimizer.zero_grad()
 
+        average_loss = running_loss / max(step_in_epoch, 1)
+        accuracy = correct_tokens / max(total_tokens, 1)
+        perplexity = torch.exp(torch.tensor(average_loss)).item()
+        print(
+            f"Epoch {epoch_idx + 1}/{epochs}: loss={average_loss:.4f}, "
+            f"perplexity={perplexity:.2f}, token_accuracy={accuracy:.4f}"
+        )
+
     os.makedirs(out_dir, exist_ok=True)
     output_path = os.path.join(out_dir, "sft.pt")
     torch.save(model.state_dict(), output_path)
@@ -110,10 +128,10 @@ def train_sft(
 def main() -> None:
     data_path = "data/hh_rlhf_sft_train.jsonl"
     out_dir = "weights"
-    batch_size = 4
+    batch_size = 8
     lr = 5e-5
-    epochs = 1
-    init_path = None
+    epochs = 3
+    init_path = "weights/gpt2.pt"
     grad_accumulation_steps = 1
     device = None
 
