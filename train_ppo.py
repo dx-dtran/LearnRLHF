@@ -11,6 +11,18 @@ from gpt import GPT, GPTConfig
 from train_rm import ScalarHead
 
 
+def _resolve_policy_state(init_checkpoint: Optional[str]) -> tuple[GPTConfig, dict | None]:
+    config = GPTConfig()
+    state = None
+    if init_checkpoint:
+        if not os.path.exists(init_checkpoint):
+            raise FileNotFoundError(
+                f"Initial policy checkpoint {init_checkpoint} does not exist; provide a Torch state dict"
+            )
+        state = torch.load(init_checkpoint, map_location="cpu")
+    return config, state
+
+
 def _pad_batch(seqs: list[torch.Tensor], pad_token: int) -> tuple[torch.Tensor, torch.Tensor]:
     if not seqs:
         return (
@@ -271,17 +283,21 @@ def train_ppo(
             f"Reward model weights not found at {reward_path}. Train the reward model first."
         )
 
-    config = GPTConfig()
+    config, policy_state = _resolve_policy_state(policy_init)
+    dataset = PreferenceDataset(preference_path, block_size=config.block_size)
+    bundle = dataset.bundle
+    if bundle.encoder.n_vocab != config.vocab_size:
+        if bundle.encoder.n_vocab > config.vocab_size:
+            raise ValueError("Tokenizer vocabulary is larger than the model embedding size")
+        config.vocab_size = bundle.encoder.n_vocab
+
     policy = GPT(config)
     reference = GPT(config)
     value_model = ScalarHead(config)
     reward_model = ScalarHead(config)
 
-    if policy_init:
-        state = torch.load(policy_init, map_location="cpu")
-        policy.load_state_dict(state, strict=False)
-        reference.load_state_dict(state, strict=False)
-        value_model.body.load_state_dict(state, strict=False)
+    if policy_state is not None:
+        policy.load_state_dict(policy_state, strict=False)
 
     reference.load_state_dict(policy.state_dict())
     value_model.body.load_state_dict(policy.state_dict(), strict=False)
@@ -292,9 +308,6 @@ def train_ppo(
     reference.to(device)
     value_model.to(device)
     reward_model.to(device)
-
-    dataset = PreferenceDataset(preference_path, block_size=config.block_size)
-    bundle = dataset.bundle
 
     trainer = PPOTrainer(
         policy,

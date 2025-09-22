@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -17,6 +17,7 @@ class GPTConfig:
     dropout: float = 0.0
 
 
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
@@ -25,8 +26,10 @@ class CausalSelfAttention(nn.Module):
         if self.head_dim * config.n_head != config.n_embd:
             raise ValueError("n_embd must be divisible by n_head")
 
-        self.qkv = nn.Linear(config.n_embd, 3 * config.n_embd, bias=False)
-        self.proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.qkv = nn.Linear(config.n_embd, 3 * config.n_embd, bias=True)
+        self.proj = nn.Linear(config.n_embd, config.n_embd, bias=True)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(
         self,
@@ -50,6 +53,7 @@ class CausalSelfAttention(nn.Module):
             att = torch.where(no_valid_keys, torch.zeros_like(att), att)
 
         att = torch.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
 
         if query_mask is not None:
             query_mask_float = query_mask.to(dtype=att.dtype)
@@ -65,7 +69,8 @@ class CausalSelfAttention(nn.Module):
             out = out.masked_fill(no_valid_keys, 0.0)
 
         out = out.transpose(1, 2).contiguous().view(b, t, c)
-        return self.proj(out)
+        out = self.proj(out)
+        return self.resid_dropout(out)
 
 
 class TransformerBlock(nn.Module):
@@ -75,10 +80,11 @@ class TransformerBlock(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.ln2 = nn.LayerNorm(config.n_embd)
         self.ff = nn.Sequential(
-            nn.Linear(config.n_embd, 4 * config.n_embd, bias=False),
+            nn.Linear(config.n_embd, 4 * config.n_embd, bias=True),
             nn.GELU(),
-            nn.Linear(4 * config.n_embd, config.n_embd, bias=False),
+            nn.Linear(4 * config.n_embd, config.n_embd, bias=True),
         )
+        self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(
         self,
@@ -87,7 +93,7 @@ class TransformerBlock(nn.Module):
         query_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         x = x + self.attn(self.ln1(x), mask, query_mask)
-        x = x + self.ff(self.ln2(x))
+        x = x + self.resid_dropout(self.ff(self.ln2(x)))
         return x
 
 
@@ -101,6 +107,7 @@ class GPT(nn.Module):
         self.ln = nn.LayerNorm(config.n_embd)
         self.head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.head.weight = self.token_embed.weight
+        self.drop = nn.Dropout(config.dropout)
 
     def _build_mask(
         self, attention_mask: torch.Tensor | None, length: int, device: torch.device
@@ -121,6 +128,7 @@ class GPT(nn.Module):
             raise ValueError("input sequence is longer than block_size")
         pos = torch.arange(t, device=tokens.device)
         x = self.token_embed(tokens) + self.position_embed(pos)[None, :, :]
+        x = self.drop(x)
         mask, query_mask = self._build_mask(attention_mask, t, tokens.device)
         for block in self.blocks:
             x = block(x, mask, query_mask)
