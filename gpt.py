@@ -1,6 +1,7 @@
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional
+from typing import MutableMapping, Optional
 
 import torch
 import torch.nn as nn
@@ -26,8 +27,8 @@ class CausalSelfAttention(nn.Module):
         if self.head_dim * config.n_head != config.n_embd:
             raise ValueError("n_embd must be divisible by n_head")
 
-        self.qkv = nn.Linear(config.n_embd, 3 * config.n_embd, bias=True)
-        self.proj = nn.Linear(config.n_embd, config.n_embd, bias=True)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=True)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=True)
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
@@ -38,7 +39,7 @@ class CausalSelfAttention(nn.Module):
         query_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         b, t, c = x.shape
-        qkv = self.qkv(x)
+        qkv = self.c_attn(x)
         q, k, v = qkv.chunk(3, dim=-1)
 
         q = q.view(b, t, self.n_head, self.head_dim).transpose(1, 2)
@@ -69,8 +70,23 @@ class CausalSelfAttention(nn.Module):
             out = out.masked_fill(no_valid_keys, 0.0)
 
         out = out.transpose(1, 2).contiguous().view(b, t, c)
-        out = self.proj(out)
+        out = self.c_proj(out)
         return self.resid_dropout(out)
+
+
+class MLP(nn.Module):
+    def __init__(self, config: GPTConfig) -> None:
+        super().__init__()
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=True)
+        self.act = nn.GELU()
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=True)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.c_fc(x)
+        x = self.act(x)
+        x = self.c_proj(x)
+        return self.dropout(x)
 
 
 class TransformerBlock(nn.Module):
@@ -79,11 +95,7 @@ class TransformerBlock(nn.Module):
         self.ln1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.ln2 = nn.LayerNorm(config.n_embd)
-        self.ff = nn.Sequential(
-            nn.Linear(config.n_embd, 4 * config.n_embd, bias=True),
-            nn.GELU(),
-            nn.Linear(4 * config.n_embd, config.n_embd, bias=True),
-        )
+        self.mlp = MLP(config)
         self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(
@@ -93,7 +105,7 @@ class TransformerBlock(nn.Module):
         query_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         x = x + self.attn(self.ln1(x), mask, query_mask)
-        x = x + self.resid_dropout(self.ff(self.ln2(x)))
+        x = x + self.resid_dropout(self.mlp(self.ln2(x)))
         return x
 
 
@@ -169,3 +181,42 @@ class GPT(nn.Module):
             if eos_token is not None and torch.any(next_token == eos_token):
                 break
         return sequence
+
+
+_TRANSPOSE_SUFFIXES = (
+    "attn.c_attn.weight",
+    "attn.c_proj.weight",
+    "mlp.c_fc.weight",
+    "mlp.c_proj.weight",
+)
+
+
+def maybe_transpose_gpt_state_dict(
+    state_dict: MutableMapping[str, torch.Tensor],
+) -> MutableMapping[str, torch.Tensor]:
+    """Transpose legacy GPT-2 weight matrices to match the current module layout."""
+
+    needs_transpose = False
+    for key, value in state_dict.items():
+        if value.ndim != 2:
+            continue
+        if any(key.endswith(suffix) for suffix in _TRANSPOSE_SUFFIXES):
+            needs_transpose = True
+            break
+
+    if not needs_transpose:
+        return state_dict
+
+    if isinstance(state_dict, OrderedDict):
+        items = state_dict.items()
+        new_state = OrderedDict()
+    else:
+        items = state_dict.items()
+        new_state = {}
+
+    for key, value in items:
+        if value.ndim == 2 and any(key.endswith(suffix) for suffix in _TRANSPOSE_SUFFIXES):
+            new_state[key] = value.transpose(0, 1)
+        else:
+            new_state[key] = value
+    return new_state

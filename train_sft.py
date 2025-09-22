@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from data import SupervisedDataset, collate_supervised
-from gpt import GPT, GPTConfig
+from gpt import GPT, GPTConfig, maybe_transpose_gpt_state_dict
 
 
 def supervised_loss(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -41,6 +41,7 @@ def _resolve_initial_state(init_checkpoint: Optional[str]) -> tuple[GPTConfig, d
                 f"Initial checkpoint {init_checkpoint} does not exist; provide a Torch state dict"
             )
         state = torch.load(init_checkpoint, map_location="cpu")
+        state = maybe_transpose_gpt_state_dict(state)
     return config, state
 
 

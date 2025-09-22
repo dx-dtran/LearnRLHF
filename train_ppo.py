@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from data import PreferenceDataset
-from gpt import GPT, GPTConfig
+from gpt import GPT, GPTConfig, maybe_transpose_gpt_state_dict
 from train_rm import ScalarHead
 
 
@@ -20,6 +20,7 @@ def _resolve_policy_state(init_checkpoint: Optional[str]) -> tuple[GPTConfig, di
                 f"Initial policy checkpoint {init_checkpoint} does not exist; provide a Torch state dict"
             )
         state = torch.load(init_checkpoint, map_location="cpu")
+        state = maybe_transpose_gpt_state_dict(state)
     return config, state
 
 
@@ -302,6 +303,7 @@ def train_ppo(
     reference.load_state_dict(policy.state_dict())
     value_model.body.load_state_dict(policy.state_dict(), strict=False)
     reward_state = torch.load(reward_path, map_location="cpu")
+    reward_state = maybe_transpose_gpt_state_dict(reward_state)
     reward_model.load_state_dict(reward_state, strict=False)
 
     policy.to(device)

@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from data import PreferenceDataset, collate_preferences
-from gpt import GPT, GPTConfig
+from gpt import GPT, GPTConfig, maybe_transpose_gpt_state_dict
 
 
 class ScalarHead(nn.Module):
@@ -39,6 +39,7 @@ def _resolve_gpt_config(
                 f"Initial checkpoint {init_checkpoint} does not exist; provide a Torch state dict"
             )
         state = torch.load(init_checkpoint, map_location="cpu")
+        state = maybe_transpose_gpt_state_dict(state)
     return config, state
 
 
