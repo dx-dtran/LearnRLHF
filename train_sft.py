@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 from torch.utils.data import DataLoader
 
-from data import SupervisedDataset, collate_supervised
+from data import SupervisedDataset
 from gpt import GPT, GPTConfig
 
 
@@ -69,12 +69,7 @@ def train_sft(
             )
         state = torch.load(init_path, map_location="cpu")
         model.load_state_dict(state, strict=False)
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=lambda batch: collate_supervised(batch, bundle.pad),
-    )
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
 

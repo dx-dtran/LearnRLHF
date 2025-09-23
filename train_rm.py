@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from data import PreferenceDataset, collate_preferences
+from data import PreferenceDataset
 from gpt import GPT, GPTConfig
 
 
@@ -63,12 +63,7 @@ def train_reward_model(
             )
         state = torch.load(init_path, map_location="cpu")
         model.body.load_state_dict(state, strict=False)
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=lambda batch: collate_preferences(batch, bundle.pad),
-    )
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))

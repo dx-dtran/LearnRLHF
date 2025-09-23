@@ -1,15 +1,14 @@
 import json
-import tempfile
-
 import os
 import sys
+import tempfile
 
 import torch
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.append(ROOT)
 
-from data import SupervisedDataset, PreferenceDataset, collate_supervised, collate_preferences
+from data import PreferenceDataset, SupervisedDataset
 
 
 def write_jsonl(rows):
@@ -20,23 +19,21 @@ def write_jsonl(rows):
     return tmp
 
 
-def test_supervised_collate_shapes():
+def test_supervised_dataset_provides_ready_tensors():
     tmp = write_jsonl([
         {"prompt": "Hello", "chosen": " world"},
         {"prompt": "Another", "chosen": " example"},
     ])
     dataset = SupervisedDataset(tmp.name, block_size=32)
-    bundle = dataset.bundle
-    batch = [dataset[i] for i in range(len(dataset))]
-    collated = collate_supervised(batch, bundle.pad)
 
-    assert collated["input_ids"].ndim == 2
-    assert collated["target_ids"].shape == collated["input_ids"].shape
-    assert collated["attention_mask"].shape == collated["input_ids"].shape
-    assert torch.all(collated["target_ids"][collated["target_ids"] == -1] == -1)
+    sample = dataset[0]
+    assert sample["input_ids"].shape == (dataset.block_size,)
+    assert sample["target_ids"].shape == (dataset.block_size,)
+    assert sample["attention_mask"].sum() > 0
+    assert torch.all(sample["target_ids"][sample["attention_mask"] == 0] == -1)
 
 
-def test_preference_collate_shapes():
+def test_preference_dataset_includes_masks():
     tmp = write_jsonl(
         [
             {
@@ -47,10 +44,11 @@ def test_preference_collate_shapes():
         ]
     )
     dataset = PreferenceDataset(tmp.name, block_size=32)
-    bundle = dataset.bundle
-    batch = [dataset[0]]
-    collated = collate_preferences(batch, bundle.pad)
 
-    assert collated["prompt"].ndim == 2
-    assert collated["chosen"].shape == collated["chosen_mask"].shape
-    assert collated["rejected"].shape == collated["rejected_mask"].shape
+    sample = dataset[0]
+    for key in ("prompt", "chosen", "rejected"):
+        tokens = sample[key]
+        mask = sample[f"{key}_mask"]
+        assert tokens.shape == (dataset.block_size,)
+        assert mask.shape == tokens.shape
+        assert mask.sum() > 0
