@@ -27,22 +27,20 @@ def test_supervised_loss_gradcheck():
     assert gradcheck(objective, (logits,), eps=1e-6, atol=1e-4, rtol=1e-4)
 
 
-def test_supervised_loss_ignores_prompt_tokens():
+def test_supervised_loss_ignores_padding():
     torch.manual_seed(0)
     batch = 1
     seq = 4
     vocab = 3
 
     logits = torch.zeros(batch, seq, vocab, dtype=torch.double, requires_grad=True)
-    targets = torch.tensor([[0, 1, 2, 0]], dtype=torch.long)
-    label_mask = torch.tensor([[0.0, 0.0, 1.0, 1.0]], dtype=torch.double)
+    targets = torch.tensor([[0, 1, 2, -1]], dtype=torch.long)
+    label_mask = torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.double)
 
     base_loss = supervised_loss(logits, targets, label_mask)
 
-    # Changing prompt logits should not affect the loss as they are masked out.
     modified_logits = logits.clone().detach()
-    modified_logits[0, 0, :] = torch.tensor([10.0, -10.0, 0.0], dtype=torch.double)
-    modified_logits[0, 1, :] = torch.tensor([-5.0, 5.0, 0.0], dtype=torch.double)
+    modified_logits[0, 3, :] = torch.tensor([10.0, -10.0, 0.0], dtype=torch.double)
     modified_logits.requires_grad_(True)
     masked_loss = supervised_loss(modified_logits, targets, label_mask)
 

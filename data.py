@@ -1,8 +1,19 @@
+"""Straightforward dataset helpers used across the training scripts.
+
+The goal of this module is to keep token handling approachable.  Instead of
+having custom collate functions that juggle padding and masks, each dataset
+returns ready-to-batch tensors.  The default PyTorch :class:`~torch.utils.data.DataLoader`
+can therefore be used without any bells and whistles which mirrors the style of
+NanoGPT's educational implementation.
+"""
+
+from __future__ import annotations
+
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
-import warnings
 
 import torch
 from torch.utils.data import Dataset
@@ -12,6 +23,8 @@ import tiktoken
 
 @dataclass
 class TokenizerBundle:
+    """Small wrapper bundling the tokenizer together with special token ids."""
+
     encoder: object
     bos: int
     eos: int
@@ -22,13 +35,15 @@ class TokenizerBundle:
 
 
 def build_tokenizer() -> TokenizerBundle:
+    """Create a GPT-2 compatible tokenizer or fall back to a byte-level one."""
+
     try:
         enc = tiktoken.get_encoding("gpt2")
         bos = enc.eot_token
         eos = enc.eot_token
         pad = enc.eot_token
         return TokenizerBundle(enc, bos, eos, pad)
-    except Exception as exc:  # pragma: no cover - fallback for offline environments
+    except Exception as exc:  # pragma: no cover - offline fallback
         warnings.warn(
             "Falling back to a minimal byte-level tokenizer because the GPT-2 "
             f"encoding could not be loaded ({exc}).",
@@ -59,61 +74,79 @@ def load_jsonl(path: str | Path) -> Iterable[dict]:
                 yield json.loads(line)
 
 
-def _split_into_sequences(
-    tokens: list[int], block_size: int
-) -> Iterable[tuple[int, list[int]]]:
+def _split_into_sequences(tokens: list[int], block_size: int) -> Iterable[list[int]]:
+    """Yield overlapping chunks that are at most ``block_size + 1`` long."""
+
     step = block_size + 1
     for start in range(0, max(0, len(tokens) - 1), block_size):
-        yield start, tokens[start : start + step]
+        yield tokens[start : start + step]
+
+
+def _pack(sequence: list[int], *, pad_value: int, length: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pad ``sequence`` to ``length`` and return both the tensor and its mask."""
+
+    tensor = torch.full((length,), pad_value, dtype=torch.long)
+    mask = torch.zeros(length, dtype=torch.long)
+    valid = min(len(sequence), length)
+    if valid:
+        tensor[:valid] = torch.tensor(sequence[:length], dtype=torch.long)
+        mask[:valid] = 1
+    return tensor, mask
 
 
 class SupervisedDataset(Dataset):
-    """Language modelling dataset with explicit ``x``/``y`` pairs.
-
-    Each JSONL row must contain ``prompt`` and ``chosen`` (or ``response``).
-    The input sequence ``x`` is every token except the last one while ``y`` is
-    the same sequence shifted by one position, mirroring the formulation used in
-    Andrej Karpathy's micro GPT implementations.
-    """
+    """Language modelling dataset mirroring NanoGPT's simple formulation."""
 
     def __init__(self, path: str | Path, block_size: int) -> None:
         self.bundle = build_tokenizer()
         self.block_size = block_size
-        self.data: list[tuple[torch.Tensor, torch.Tensor, int]] = []
+        self._rows: list[dict[str, torch.Tensor]] = []
 
         for row in load_jsonl(path):
             prompt = row.get("prompt", "")
             answer = row.get("chosen", row.get("response", ""))
+
             prompt_tokens = [self.bundle.bos] + self.bundle.encode(prompt)
-            prompt_length = len(prompt_tokens)
             tokens = prompt_tokens + self.bundle.encode(answer) + [self.bundle.eos]
-            for start, chunk in _split_into_sequences(tokens, block_size):
+
+            for chunk in _split_into_sequences(tokens, block_size):
                 if len(chunk) < 2:
                     continue
-                x_tokens = torch.tensor(chunk[:-1], dtype=torch.long)
-                y_tokens = torch.tensor(chunk[1:], dtype=torch.long)
-                first_target_idx = start + 1
-                chunk_end = start + len(chunk)
-                prompt_in_chunk = 0
-                if first_target_idx < prompt_length:
-                    prompt_in_chunk = min(prompt_length, chunk_end) - first_target_idx
-                    prompt_in_chunk = max(prompt_in_chunk, 0)
-                self.data.append((x_tokens, y_tokens, int(prompt_in_chunk)))
 
-    def __len__(self) -> int:
-        return len(self.data)
+                inputs = chunk[:-1]
+                targets = chunk[1:]
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, int]:
-        return self.data[index]
+                input_tensor, attention_mask = _pack(
+                    inputs, pad_value=self.bundle.pad, length=block_size
+                )
+                target_tensor, _ = _pack(targets, pad_value=self.bundle.pad, length=block_size)
+                target_tensor[attention_mask == 0] = -1
+
+                label_mask = attention_mask.clone()
+
+                self._rows.append(
+                    {
+                        "input_ids": input_tensor,
+                        "target_ids": target_tensor,
+                        "attention_mask": attention_mask,
+                        "label_mask": label_mask,
+                    }
+                )
+
+    def __len__(self) -> int:  # pragma: no cover - trivial
+        return len(self._rows)
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        return self._rows[index]
 
 
 class PreferenceDataset(Dataset):
-    """Dataset used for training reward models and PPO."""
+    """Preference data where every row already carries its padding mask."""
 
     def __init__(self, path: str | Path, block_size: int) -> None:
         self.bundle = build_tokenizer()
         self.block_size = block_size
-        self.rows: list[dict[str, torch.Tensor]] = []
+        self._rows: list[dict[str, torch.Tensor]] = []
 
         for row in load_jsonl(path):
             prompt = row.get("prompt", "")
@@ -122,79 +155,31 @@ class PreferenceDataset(Dataset):
 
             prompt_tokens = [self.bundle.bos] + self.bundle.encode(prompt)
             chosen_tokens = prompt_tokens + self.bundle.encode(chosen) + [self.bundle.eos]
-            rejected_tokens = (
-                prompt_tokens + self.bundle.encode(rejected) + [self.bundle.eos]
+            rejected_tokens = prompt_tokens + self.bundle.encode(rejected) + [self.bundle.eos]
+
+            prompt_tensor, prompt_mask = _pack(
+                prompt_tokens, pad_value=self.bundle.pad, length=block_size
+            )
+            chosen_tensor, chosen_mask = _pack(
+                chosen_tokens, pad_value=self.bundle.pad, length=block_size
+            )
+            rejected_tensor, rejected_mask = _pack(
+                rejected_tokens, pad_value=self.bundle.pad, length=block_size
             )
 
-            self.rows.append(
+            self._rows.append(
                 {
-                    "prompt": torch.tensor(prompt_tokens[:block_size], dtype=torch.long),
-                    "chosen": torch.tensor(chosen_tokens[:block_size], dtype=torch.long),
-                    "rejected": torch.tensor(rejected_tokens[:block_size], dtype=torch.long),
+                    "prompt": prompt_tensor,
+                    "prompt_mask": prompt_mask,
+                    "chosen": chosen_tensor,
+                    "chosen_mask": chosen_mask,
+                    "rejected": rejected_tensor,
+                    "rejected_mask": rejected_mask,
                 }
             )
 
-    def __len__(self) -> int:
-        return len(self.rows)
+    def __len__(self) -> int:  # pragma: no cover - trivial
+        return len(self._rows)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        return self.rows[index]
-
-
-def _pad_sequences(seqs: list[torch.Tensor], pad_value: int) -> tuple[torch.Tensor, torch.Tensor]:
-    if not seqs:
-        return torch.zeros(0, 0, dtype=torch.long), torch.zeros(0, 0, dtype=torch.long)
-    max_len = max(seq.size(0) for seq in seqs)
-    batch = torch.full((len(seqs), max_len), pad_value, dtype=torch.long)
-    mask = torch.zeros((len(seqs), max_len), dtype=torch.long)
-    for i, seq in enumerate(seqs):
-        length = seq.size(0)
-        batch[i, :length] = seq
-        mask[i, :length] = 1
-    return batch, mask
-
-
-def collate_supervised(
-    batch: list[tuple[torch.Tensor, torch.Tensor, int]], pad_token: int
-) -> dict[str, torch.Tensor]:
-    inputs, targets, prompt_lengths = zip(*batch)
-    x, attention_mask = _pad_sequences(list(inputs), pad_token)
-    y, _ = _pad_sequences(list(targets), -1)
-    y = y.long()
-    y[attention_mask == 0] = -1
-
-    label_masks: list[torch.Tensor] = []
-    for target, prompt_len in zip(targets, prompt_lengths):
-        seq_len = target.size(0)
-        prompt_len = min(prompt_len, seq_len)
-        label_mask = torch.zeros(seq_len, dtype=torch.long)
-        if prompt_len < seq_len:
-            label_mask[prompt_len:] = 1
-        label_masks.append(label_mask)
-    label_mask, _ = _pad_sequences(label_masks, 0)
-
-    return {
-        "input_ids": x,
-        "target_ids": y,
-        "attention_mask": attention_mask,
-        "label_mask": label_mask,
-    }
-
-
-def collate_preferences(batch: list[dict[str, torch.Tensor]], pad_token: int) -> dict[str, torch.Tensor]:
-    prompts = [item["prompt"] for item in batch]
-    chosen = [item["chosen"] for item in batch]
-    rejected = [item["rejected"] for item in batch]
-
-    prompt_pad, prompt_mask = _pad_sequences(prompts, pad_token)
-    chosen_pad, chosen_mask = _pad_sequences(chosen, pad_token)
-    rejected_pad, rejected_mask = _pad_sequences(rejected, pad_token)
-
-    return {
-        "prompt": prompt_pad,
-        "prompt_mask": prompt_mask,
-        "chosen": chosen_pad,
-        "chosen_mask": chosen_mask,
-        "rejected": rejected_pad,
-        "rejected_mask": rejected_mask,
-    }
+        return self._rows[index]
