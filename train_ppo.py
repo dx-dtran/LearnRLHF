@@ -10,7 +10,39 @@ import torch.nn.functional as F
 from data import PreferenceDataset
 from gpt import GPT, GPTConfig
 from train_rm import ScalarHead
-from ppo_data import batch_prompts, collect_response_log_probs, prepare_sample_batch
+from ppo_data import (
+    batch_prompts,
+    collect_response_log_probs,
+    prepare_sample_batch as _prepare_sample_batch_impl,
+)
+
+
+def gather_log_probs(*args, **kwargs):
+    """Backward-compatible alias for the relocated helper."""
+
+    return collect_response_log_probs(*args, **kwargs)
+
+
+def prepare_sample_batch(*args, **kwargs):
+    """Wrap the new helper while keeping legacy keys available."""
+
+    sample = _prepare_sample_batch_impl(*args, **kwargs)
+    if "response_token_mask" in sample and "response_mask" not in sample:
+        sample["response_mask"] = sample["response_token_mask"]
+    return sample
+
+
+def _prepare_sample_batch(prompts, prompt_mask, trainer, **kwargs):
+    """Compatibility shim used by tests importing from ``train_ppo``."""
+
+    sample = prepare_sample_batch(
+        prompts,
+        prompt_mask,
+        policy=trainer.policy,
+        value_fn=trainer.compute_values,
+        **kwargs,
+    )
+    return sample
 
 class ValueHead(nn.Module):
     """Lightweight value projection sharing the policy transformer."""
