@@ -22,8 +22,8 @@ import tiktoken
 
 
 @dataclass
-class TokenizerBundle:
-    """Small wrapper bundling the tokenizer together with special token ids."""
+class TokenizerInfo:
+    """Tokenizer helper exposing the encoder and its special token ids."""
 
     encoder: object
     bos: int
@@ -34,7 +34,7 @@ class TokenizerBundle:
         return self.encoder.encode(text)
 
 
-def build_tokenizer() -> TokenizerBundle:
+def build_tokenizer() -> TokenizerInfo:
     """Create a GPT-2 compatible tokenizer or fall back to a byte-level one."""
 
     try:
@@ -42,7 +42,7 @@ def build_tokenizer() -> TokenizerBundle:
         bos = enc.eot_token
         eos = enc.eot_token
         pad = enc.eot_token
-        return TokenizerBundle(enc, bos, eos, pad)
+        return TokenizerInfo(enc, bos, eos, pad)
     except Exception as exc:  # pragma: no cover - offline fallback
         warnings.warn(
             "Falling back to a minimal byte-level tokenizer because the GPT-2 "
@@ -63,7 +63,7 @@ def build_tokenizer() -> TokenizerBundle:
         bos = special_tokens["<|bos|>"]
         eos = special_tokens["<|eos|>"]
         pad = special_tokens["<|pad|>"]
-        return TokenizerBundle(enc, bos, eos, pad)
+        return TokenizerInfo(enc, bos, eos, pad)
 
 
 def load_jsonl(path: str | Path) -> Iterable[dict]:
@@ -98,7 +98,7 @@ class SupervisedDataset(Dataset):
     """Language modelling dataset mirroring NanoGPT's simple formulation."""
 
     def __init__(self, path: str | Path, block_size: int) -> None:
-        self.bundle = build_tokenizer()
+        self.tokenizer = build_tokenizer()
         self.block_size = block_size
         self._rows: list[dict[str, torch.Tensor]] = []
 
@@ -106,8 +106,8 @@ class SupervisedDataset(Dataset):
             prompt = row.get("prompt", "")
             answer = row.get("chosen", row.get("response", ""))
 
-            prompt_tokens = [self.bundle.bos] + self.bundle.encode(prompt)
-            tokens = prompt_tokens + self.bundle.encode(answer) + [self.bundle.eos]
+            prompt_tokens = [self.tokenizer.bos] + self.tokenizer.encode(prompt)
+            tokens = prompt_tokens + self.tokenizer.encode(answer) + [self.tokenizer.eos]
 
             for chunk in _split_into_sequences(tokens, block_size):
                 if len(chunk) < 2:
@@ -117,9 +117,11 @@ class SupervisedDataset(Dataset):
                 targets = chunk[1:]
 
                 input_tensor, attention_mask = _pack(
-                    inputs, pad_value=self.bundle.pad, length=block_size
+                    inputs, pad_value=self.tokenizer.pad, length=block_size
                 )
-                target_tensor, _ = _pack(targets, pad_value=self.bundle.pad, length=block_size)
+                target_tensor, _ = _pack(
+                    targets, pad_value=self.tokenizer.pad, length=block_size
+                )
                 target_tensor[attention_mask == 0] = -1
 
                 label_mask = attention_mask.clone()
@@ -144,7 +146,7 @@ class PreferenceDataset(Dataset):
     """Preference data where every row already carries its padding mask."""
 
     def __init__(self, path: str | Path, block_size: int) -> None:
-        self.bundle = build_tokenizer()
+        self.tokenizer = build_tokenizer()
         self.block_size = block_size
         self._rows: list[dict[str, torch.Tensor]] = []
 
@@ -153,18 +155,18 @@ class PreferenceDataset(Dataset):
             chosen = row.get("chosen", "")
             rejected = row.get("rejected", "")
 
-            prompt_tokens = [self.bundle.bos] + self.bundle.encode(prompt)
-            chosen_tokens = prompt_tokens + self.bundle.encode(chosen) + [self.bundle.eos]
-            rejected_tokens = prompt_tokens + self.bundle.encode(rejected) + [self.bundle.eos]
+            prompt_tokens = [self.tokenizer.bos] + self.tokenizer.encode(prompt)
+            chosen_tokens = prompt_tokens + self.tokenizer.encode(chosen) + [self.tokenizer.eos]
+            rejected_tokens = prompt_tokens + self.tokenizer.encode(rejected) + [self.tokenizer.eos]
 
             prompt_tensor, prompt_mask = _pack(
-                prompt_tokens, pad_value=self.bundle.pad, length=block_size
+                prompt_tokens, pad_value=self.tokenizer.pad, length=block_size
             )
             chosen_tensor, chosen_mask = _pack(
-                chosen_tokens, pad_value=self.bundle.pad, length=block_size
+                chosen_tokens, pad_value=self.tokenizer.pad, length=block_size
             )
             rejected_tensor, rejected_mask = _pack(
-                rejected_tokens, pad_value=self.bundle.pad, length=block_size
+                rejected_tokens, pad_value=self.tokenizer.pad, length=block_size
             )
 
             self._rows.append(
