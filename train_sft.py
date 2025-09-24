@@ -55,11 +55,11 @@ def train_sft(
 
     config = GPTConfig()
     dataset = SupervisedDataset(data_path, block_size=config.block_size)
-    bundle = dataset.bundle
-    if bundle.encoder.n_vocab != config.vocab_size:
-        if bundle.encoder.n_vocab > config.vocab_size:
+    tokenizer_bundle = dataset.tokenizer_bundle
+    if tokenizer_bundle.encoder.n_vocab != config.vocab_size:
+        if tokenizer_bundle.encoder.n_vocab > config.vocab_size:
             raise ValueError("Tokenizer vocabulary is larger than the model embedding size")
-        config.vocab_size = bundle.encoder.n_vocab
+        config.vocab_size = tokenizer_bundle.encoder.n_vocab
 
     model = GPT(config).to(device)
     if init_path is not None:
