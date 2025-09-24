@@ -10,6 +10,11 @@ import torch.nn.functional as F
 from data import PreferenceDataset
 from gpt import GPT, GPTConfig
 from train_rm import ScalarHead
+from ppo_data import (
+    batch_prompt_rows,
+    build_model_inputs,
+    gather_response_log_probs,
+)
 
 class ValueHead(nn.Module):
     """Lightweight value projection sharing the policy transformer."""
@@ -25,42 +30,6 @@ class ValueHead(nn.Module):
         batch_indices = torch.arange(hidden.size(0), device=hidden.device)
         last_hidden = hidden[batch_indices, lengths]
         return self.proj(last_hidden).squeeze(-1)
-
-def _pad_batch(seqs: list[torch.Tensor], pad_token: int) -> tuple[torch.Tensor, torch.Tensor]:
-    if not seqs:
-        return (
-            torch.zeros(0, 0, dtype=torch.long),
-            torch.zeros(0, 0, dtype=torch.float32),
-        )
-    max_len = max(seq.size(0) for seq in seqs)
-    tokens = torch.full((len(seqs), max_len), pad_token, dtype=torch.long)
-    mask = torch.zeros((len(seqs), max_len), dtype=torch.float32)
-    for i, seq in enumerate(seqs):
-        length = seq.size(0)
-        if length:
-            tokens[i, :length] = seq
-            mask[i, :length] = 1.0
-    return tokens, mask
-
-
-def gather_log_probs(
-    log_probs: torch.Tensor,
-    responses: torch.Tensor,
-    prompt_lengths: torch.Tensor,
-    response_lengths: torch.Tensor,
-) -> torch.Tensor:
-    batch, max_response = responses.shape
-    collected = log_probs.new_zeros(batch, max_response)
-    for i in range(batch):
-        start = int(prompt_lengths[i].item())
-        length = int(response_lengths[i].item())
-        if length == 0:
-            continue
-        token_slice = responses[i, :length]
-        log_slice = log_probs[i, start : start + length]
-        collected[i, :length] = log_slice.gather(1, token_slice.unsqueeze(-1)).squeeze(-1)
-    return collected
-
 
 class PPOTrainer:
     def __init__(
@@ -106,7 +75,9 @@ class PPOTrainer:
         advantages: torch.Tensor,
         old_log_probs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        new_log_probs = gather_log_probs(log_probs, responses, prompt_lengths, response_lengths)
+        new_log_probs = gather_response_log_probs(
+            log_probs, responses, prompt_lengths, response_lengths
+        )
         ratios = (new_log_probs - old_log_probs).exp()
         advantages = advantages.unsqueeze(1)
 
@@ -182,86 +153,6 @@ class PPOTrainer:
         }
 
 
-def _prepare_sample_batch(
-    prompts: torch.Tensor,
-    prompt_mask: torch.Tensor,
-    trainer: PPOTrainer,
-    max_new_tokens: int,
-    pad_token: int,
-    eos_token: int,
-) -> dict[str, torch.Tensor]:
-    device = prompts.device
-
-    prompt_lengths = prompt_mask.sum(dim=1).long().tolist()
-    prompt_list = [prompts[i, : length].cpu() for i, length in enumerate(prompt_lengths)]
-
-    responses: list[torch.Tensor] = []
-    full_sequences: list[torch.Tensor] = []
-    response_lengths: list[int] = []
-    block_size = trainer.policy.config.block_size
-    for prompt, length in zip(prompt_list, prompt_lengths):
-        headroom = max(block_size - length, 0)
-        allowed_new_tokens = min(max_new_tokens, headroom)
-        if allowed_new_tokens <= 0:
-            full = prompt.clone()
-            response = prompt.new_empty((0,), dtype=torch.long)
-        else:
-            generated = trainer.policy.generate(
-                prompt.unsqueeze(0).to(device), allowed_new_tokens, eos_token=eos_token
-            )
-            full = generated[0].detach().cpu()
-            response = full[length:]
-        full_sequences.append(full)
-        responses.append(response)
-        response_lengths.append(response.size(0))
-
-    full_tokens, full_mask = _pad_batch(full_sequences, pad_token)
-    responses_tokens, responses_mask = _pad_batch(responses, pad_token)
-
-    response_token_mask = torch.zeros_like(full_mask)
-    for i, (p_len, r_len) in enumerate(zip(prompt_lengths, response_lengths)):
-        if r_len:
-            response_token_mask[i, p_len : p_len + r_len] = 1.0
-
-    full_tokens = full_tokens.to(device)
-    full_mask = full_mask.to(device)
-    responses_tokens = responses_tokens.to(device)
-    responses_mask = responses_mask.to(device)
-    response_token_mask = response_token_mask.to(device)
-    prompt_lengths_tensor = torch.tensor(prompt_lengths, device=device, dtype=torch.long)
-    response_lengths_tensor = torch.tensor(response_lengths, device=device, dtype=torch.long)
-
-    with torch.no_grad():
-        hidden = trainer.policy.transform(full_tokens, attention_mask=full_mask)
-        logits = trainer.policy.head(hidden)
-        log_probs = F.log_softmax(logits, dim=-1)
-        old_log_probs = gather_log_probs(
-            log_probs,
-            responses_tokens,
-            prompt_lengths_tensor,
-            response_lengths_tensor,
-        )
-        old_values = trainer.compute_values(hidden, full_mask)
-
-    return {
-        "full": full_tokens,
-        "full_mask": full_mask,
-        "responses": responses_tokens,
-        "responses_mask": responses_mask,
-        "prompt_lengths": prompt_lengths_tensor,
-        "response_lengths": response_lengths_tensor,
-        "old_log_probs": old_log_probs.detach(),
-        "old_values": old_values.detach(),
-        "response_mask": response_token_mask,
-    }
-
-
-def _batch_prompts(rows: list[dict[str, torch.Tensor]], pad: int) -> tuple[torch.Tensor, torch.Tensor]:
-    prompts = [row["prompt"] for row in rows]
-    tokens, mask = _pad_batch(prompts, pad)
-    return tokens, mask
-
-
 def train_ppo(
     preference_path: str,
     *,
@@ -291,11 +182,11 @@ def train_ppo(
 
     config = GPTConfig()
     dataset = PreferenceDataset(preference_path, block_size=config.block_size)
-    bundle = dataset.bundle
-    if bundle.encoder.n_vocab != config.vocab_size:
-        if bundle.encoder.n_vocab > config.vocab_size:
+    tokenizer_bundle = dataset.tokenizer_bundle
+    if tokenizer_bundle.encoder.n_vocab != config.vocab_size:
+        if tokenizer_bundle.encoder.n_vocab > config.vocab_size:
             raise ValueError("Tokenizer vocabulary is larger than the model embedding size")
-        config.vocab_size = bundle.encoder.n_vocab
+        config.vocab_size = tokenizer_bundle.encoder.n_vocab
 
     policy = GPT(config)
     reference = GPT(config)
@@ -325,7 +216,7 @@ def train_ppo(
         reference,
         value_head,
         reward_model,
-        pad_token=bundle.pad,
+        pad_token=tokenizer_bundle.pad,
         clip=clip,
         kl=kl_coef,
         entropy=entropy_coef,
@@ -339,17 +230,18 @@ def train_ppo(
             rows = [dataset[int(i)] for i in indices]
             if not rows:
                 continue
-            prompt_tokens, prompt_mask = _batch_prompts(rows, bundle.pad)
+            prompt_tokens, prompt_mask = batch_prompt_rows(rows, tokenizer_bundle.pad)
             prompt_tokens = prompt_tokens.to(device)
             prompt_mask = prompt_mask.to(device)
 
-            sample = _prepare_sample_batch(
+            sample = build_model_inputs(
+                policy,
+                policy.value_head,
                 prompt_tokens,
                 prompt_mask,
-                trainer,
-                max_new_tokens,
-                bundle.pad,
-                bundle.eos,
+                max_new_tokens=max_new_tokens,
+                pad_token=tokenizer_bundle.pad,
+                eos_token=tokenizer_bundle.eos,
             )
             with torch.no_grad():
                 rewards = reward_model(sample["full"], sample["full_mask"])

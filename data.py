@@ -98,7 +98,7 @@ class SupervisedDataset(Dataset):
     """Language modelling dataset mirroring NanoGPT's simple formulation."""
 
     def __init__(self, path: str | Path, block_size: int) -> None:
-        self.bundle = build_tokenizer()
+        self.tokenizer_bundle = build_tokenizer()
         self.block_size = block_size
         self._rows: list[dict[str, torch.Tensor]] = []
 
@@ -106,8 +106,10 @@ class SupervisedDataset(Dataset):
             prompt = row.get("prompt", "")
             answer = row.get("chosen", row.get("response", ""))
 
-            prompt_tokens = [self.bundle.bos] + self.bundle.encode(prompt)
-            tokens = prompt_tokens + self.bundle.encode(answer) + [self.bundle.eos]
+            prompt_tokens = [self.tokenizer_bundle.bos] + self.tokenizer_bundle.encode(prompt)
+            tokens = prompt_tokens + self.tokenizer_bundle.encode(answer) + [
+                self.tokenizer_bundle.eos
+            ]
 
             for chunk in _split_into_sequences(tokens, block_size):
                 if len(chunk) < 2:
@@ -117,9 +119,11 @@ class SupervisedDataset(Dataset):
                 targets = chunk[1:]
 
                 input_tensor, attention_mask = _pack(
-                    inputs, pad_value=self.bundle.pad, length=block_size
+                    inputs, pad_value=self.tokenizer_bundle.pad, length=block_size
                 )
-                target_tensor, _ = _pack(targets, pad_value=self.bundle.pad, length=block_size)
+                target_tensor, _ = _pack(
+                    targets, pad_value=self.tokenizer_bundle.pad, length=block_size
+                )
                 target_tensor[attention_mask == 0] = -1
 
                 label_mask = attention_mask.clone()
@@ -144,7 +148,7 @@ class PreferenceDataset(Dataset):
     """Preference data where every row already carries its padding mask."""
 
     def __init__(self, path: str | Path, block_size: int) -> None:
-        self.bundle = build_tokenizer()
+        self.tokenizer_bundle = build_tokenizer()
         self.block_size = block_size
         self._rows: list[dict[str, torch.Tensor]] = []
 
@@ -153,18 +157,22 @@ class PreferenceDataset(Dataset):
             chosen = row.get("chosen", "")
             rejected = row.get("rejected", "")
 
-            prompt_tokens = [self.bundle.bos] + self.bundle.encode(prompt)
-            chosen_tokens = prompt_tokens + self.bundle.encode(chosen) + [self.bundle.eos]
-            rejected_tokens = prompt_tokens + self.bundle.encode(rejected) + [self.bundle.eos]
+            prompt_tokens = [self.tokenizer_bundle.bos] + self.tokenizer_bundle.encode(prompt)
+            chosen_tokens = prompt_tokens + self.tokenizer_bundle.encode(chosen) + [
+                self.tokenizer_bundle.eos
+            ]
+            rejected_tokens = prompt_tokens + self.tokenizer_bundle.encode(rejected) + [
+                self.tokenizer_bundle.eos
+            ]
 
             prompt_tensor, prompt_mask = _pack(
-                prompt_tokens, pad_value=self.bundle.pad, length=block_size
+                prompt_tokens, pad_value=self.tokenizer_bundle.pad, length=block_size
             )
             chosen_tensor, chosen_mask = _pack(
-                chosen_tokens, pad_value=self.bundle.pad, length=block_size
+                chosen_tokens, pad_value=self.tokenizer_bundle.pad, length=block_size
             )
             rejected_tensor, rejected_mask = _pack(
-                rejected_tokens, pad_value=self.bundle.pad, length=block_size
+                rejected_tokens, pad_value=self.tokenizer_bundle.pad, length=block_size
             )
 
             self._rows.append(

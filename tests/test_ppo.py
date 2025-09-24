@@ -11,7 +11,8 @@ sys.path.append(ROOT)
 
 from gpt import GPTConfig, GPT
 from train_rm import ScalarHead
-from train_ppo import PPOTrainer, ValueHead, _prepare_sample_batch, gather_log_probs
+from train_ppo import PPOTrainer, ValueHead
+from ppo_data import build_model_inputs, gather_response_log_probs
 from train_ppo import train_ppo  # noqa: F401  # ensure module imports without argparse
 
 
@@ -49,7 +50,7 @@ def test_ppo_step_runs():
         hidden = trainer.policy.transform(full, attention_mask=mask)
         logits = trainer.policy.head(hidden)
         log_probs = F.log_softmax(logits, dim=-1)
-        old_log_probs = gather_log_probs(
+        old_log_probs = gather_response_log_probs(
             log_probs, responses, prompt_lengths, response_lengths
         )
         old_values = trainer.compute_values(hidden, mask)
@@ -137,10 +138,11 @@ def test_prepare_sample_batch_stops_after_eos():
     prompts = torch.tensor([[2, 3]])
     prompt_mask = torch.ones_like(prompts)
 
-    sample = _prepare_sample_batch(
+    sample = build_model_inputs(
+        trainer.policy,
+        trainer.value_head,
         prompts,
         prompt_mask,
-        trainer,
         max_new_tokens=3,
         pad_token=pad_token,
         eos_token=eos_token,
@@ -161,10 +163,11 @@ def test_prepare_sample_batch_handles_full_prompts():
     prompts = torch.arange(block_size, dtype=torch.long).unsqueeze(0) % config.vocab_size
     prompt_mask = torch.ones_like(prompts)
 
-    sample = _prepare_sample_batch(
+    sample = build_model_inputs(
+        trainer.policy,
+        trainer.value_head,
         prompts,
         prompt_mask,
-        trainer,
         max_new_tokens=4,
         pad_token=0,
         eos_token=1,

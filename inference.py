@@ -20,17 +20,19 @@ def load_model(weights_path: str, device: torch.device) -> GPT:
     return model
 
 
-def prepare_prompt(bundle: TokenizerBundle, prompt: str, device: torch.device) -> torch.Tensor:
+def prepare_prompt(
+    tokenizer: TokenizerBundle, prompt: str, device: torch.device
+) -> torch.Tensor:
     """Convert ``prompt`` into a tensor including the BOS token."""
 
-    tokens = [bundle.bos] + bundle.encode(prompt)
+    tokens = [tokenizer.bos] + tokenizer.encode(prompt)
     tensor = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
     return tensor
 
 
 def generate_text(
     model: GPT,
-    bundle: TokenizerBundle,
+    tokenizer: TokenizerBundle,
     prompt: str,
     *,
     max_new_tokens: int = 128,
@@ -42,23 +44,23 @@ def generate_text(
         raise ValueError("temperature must be positive")
 
     device = next(model.parameters()).device
-    input_tokens = prepare_prompt(bundle, prompt, device)
+    input_tokens = prepare_prompt(tokenizer, prompt, device)
     sequence = model.generate(
         input_tokens,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
-        eos_token=bundle.eos,
+        eos_token=tokenizer.eos,
     )
     generated_tokens = sequence[0].tolist()
 
     # Drop the leading BOS and stop at EOS if present.
-    if bundle.bos in generated_tokens:
+    if tokenizer.bos in generated_tokens:
         generated_tokens = generated_tokens[1:]
-    if bundle.eos in generated_tokens:
-        eos_index = generated_tokens.index(bundle.eos)
+    if tokenizer.eos in generated_tokens:
+        eos_index = generated_tokens.index(tokenizer.eos)
         generated_tokens = generated_tokens[:eos_index]
 
-    return bundle.encoder.decode(generated_tokens)
+    return tokenizer.encoder.decode(generated_tokens)
 
 
 def main() -> None:
@@ -66,9 +68,11 @@ def main() -> None:
     weights_path = "weights/sft.pt"
     prompt = "Human: Explain the importance of reinforcement learning from human feedback.\nAssistant:"
 
-    bundle = build_tokenizer()
+    tokenizer = build_tokenizer()
     model = load_model(weights_path, device)
-    completion = generate_text(model, bundle, prompt, max_new_tokens=120, temperature=0.8)
+    completion = generate_text(
+        model, tokenizer, prompt, max_new_tokens=120, temperature=0.8
+    )
 
     print("Prompt:\n" + prompt)
     print("\nModel completion:\n" + completion)
