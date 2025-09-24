@@ -26,6 +26,42 @@ class ScalarHead(nn.Module):
 
 def preference_loss(chosen: torch.Tensor, rejected: torch.Tensor) -> torch.Tensor:
     return -torch.nn.functional.logsigmoid(chosen - rejected).mean()
+def _evaluate_preferences(
+    model: "ScalarHead",
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[float, float]:
+    was_training = model.training
+    model.eval()
+    running_loss = 0.0
+    preference_correct = 0
+    preference_total = 0
+    batches = 0
+
+    with torch.no_grad():
+        for batch in loader:
+            chosen = batch["chosen"].to(device)
+            chosen_mask = batch["chosen_mask"].to(device)
+            rejected = batch["rejected"].to(device)
+            rejected_mask = batch["rejected_mask"].to(device)
+
+            chosen_scores = model(chosen, chosen_mask)
+            rejected_scores = model(rejected, rejected_mask)
+            loss = preference_loss(chosen_scores, rejected_scores)
+
+            running_loss += loss.item()
+            preference_correct += (chosen_scores > rejected_scores).sum().item()
+            preference_total += chosen_scores.size(0)
+            batches += 1
+
+    if was_training:
+        model.train()
+
+    average_loss = running_loss / max(batches, 1)
+    accuracy = preference_correct / max(preference_total, 1)
+    return float(average_loss), float(accuracy)
+
+
 def train_reward_model(
     data_path: str,
     *,
@@ -37,6 +73,7 @@ def train_reward_model(
     grad_accumulation_steps: int = 1,
     init_path: Optional[str] = "weights/sft.pt",
     device: Optional[torch.device] = None,
+    metrics: Optional[list[dict[str, float]]] = None,
 ) -> str:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -63,6 +100,7 @@ def train_reward_model(
             )
         state = torch.load(init_path, map_location="cpu")
         model.body.load_state_dict(state, strict=False)
+    eval_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     model.to(device)
@@ -70,6 +108,16 @@ def train_reward_model(
 
     if grad_accumulation_steps < 1:
         raise ValueError("grad_accumulation_steps must be a positive integer")
+
+    initial_loss, initial_accuracy = _evaluate_preferences(model, eval_loader, device)
+    if metrics is not None:
+        metrics.append(
+            {
+                "epoch": 0,
+                "loss": initial_loss,
+                "preference_accuracy": initial_accuracy,
+            }
+        )
 
     for epoch_idx in range(epochs):
         optimizer.zero_grad()
@@ -110,8 +158,15 @@ def train_reward_model(
             optimizer.step()
             optimizer.zero_grad()
 
-        average_loss = running_loss / max(step_in_epoch, 1)
-        accuracy = preference_correct / max(preference_total, 1)
+        average_loss, accuracy = _evaluate_preferences(model, eval_loader, device)
+        if metrics is not None:
+            metrics.append(
+                {
+                    "epoch": epoch_idx + 1,
+                    "loss": average_loss,
+                    "preference_accuracy": accuracy,
+                }
+            )
         print(
             f"Epoch {epoch_idx + 1}/{epochs}: loss={average_loss:.4f}, "
             f"preference_accuracy={accuracy:.4f}"

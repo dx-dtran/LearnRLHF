@@ -34,6 +34,44 @@ def supervised_loss(
     return (per_token * flat_mask).sum() / denom
 
 
+def _evaluate_supervised(
+    model: GPT,
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[float, float, float]:
+    was_training = model.training
+    model.eval()
+    running_loss = 0.0
+    total_tokens = 0
+    correct_tokens = 0
+    batches = 0
+
+    with torch.no_grad():
+        for batch in loader:
+            tokens = batch["input_ids"].to(device)
+            targets = batch["target_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            label_mask = batch["label_mask"].to(device)
+
+            logits, _ = model(tokens, attention_mask=attention_mask)
+            loss = supervised_loss(logits, targets, label_mask)
+
+            predictions = logits.argmax(dim=-1)
+            valid = (targets != -1) & label_mask.bool()
+            correct_tokens += (predictions.eq(targets) & valid).sum().item()
+            total_tokens += valid.sum().item()
+            running_loss += loss.item()
+            batches += 1
+
+    if was_training:
+        model.train()
+
+    average_loss = running_loss / max(batches, 1)
+    accuracy = correct_tokens / max(total_tokens, 1)
+    perplexity = torch.exp(torch.tensor(average_loss)).item()
+    return float(average_loss), float(perplexity), float(accuracy)
+
+
 def train_sft(
     data_path: str,
     *,
@@ -44,6 +82,7 @@ def train_sft(
     grad_accumulation_steps: int = 1,
     init_path: Optional[str] = None,
     device: Optional[torch.device] = None,
+    metrics: Optional[list[dict[str, float]]] = None,
 ) -> str:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -69,12 +108,26 @@ def train_sft(
             )
         state = torch.load(init_path, map_location="cpu")
         model.load_state_dict(state, strict=False)
+    eval_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
 
     if grad_accumulation_steps < 1:
         raise ValueError("grad_accumulation_steps must be a positive integer")
+
+    initial_loss, initial_perplexity, initial_accuracy = _evaluate_supervised(
+        model, eval_loader, device
+    )
+    if metrics is not None:
+        metrics.append(
+            {
+                "epoch": 0,
+                "loss": initial_loss,
+                "perplexity": initial_perplexity,
+                "token_accuracy": initial_accuracy,
+            }
+        )
 
     for epoch_idx in range(epochs):
         optimizer.zero_grad()
@@ -116,9 +169,18 @@ def train_sft(
             optimizer.step()
             optimizer.zero_grad()
 
-        average_loss = running_loss / max(step_in_epoch, 1)
-        accuracy = correct_tokens / max(total_tokens, 1)
-        perplexity = torch.exp(torch.tensor(average_loss)).item()
+        average_loss, perplexity, accuracy = _evaluate_supervised(
+            model, eval_loader, device
+        )
+        if metrics is not None:
+            metrics.append(
+                {
+                    "epoch": epoch_idx + 1,
+                    "loss": average_loss,
+                    "perplexity": perplexity,
+                    "token_accuracy": accuracy,
+                }
+            )
         print(
             f"Epoch {epoch_idx + 1}/{epochs}: loss={average_loss:.4f}, "
             f"perplexity={perplexity:.2f}, token_accuracy={accuracy:.4f}"

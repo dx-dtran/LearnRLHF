@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -102,6 +103,30 @@ def test_train_sft_saves_checkpoint(tmp_path, tiny_training_setup):
     assert any(key.startswith("token_embed") for key in state)
 
 
+def test_train_sft_reduces_loss(tmp_path, tiny_training_setup):
+    torch.manual_seed(0)
+    data_path = _make_supervised_file(tmp_path)
+    out_dir = tmp_path / "weights"
+    metrics: list[dict[str, float]] = []
+
+    train_sft.train_sft(
+        str(data_path),
+        out_dir=str(out_dir),
+        batch_size=2,
+        epochs=3,
+        lr=5e-3,
+        grad_accumulation_steps=1,
+        device=torch.device("cpu"),
+        metrics=metrics,
+    )
+
+    assert metrics and metrics[0]["epoch"] == 0
+    final = metrics[-1]
+    initial = metrics[0]
+    assert final["loss"] < initial["loss"]
+    assert final["token_accuracy"] >= initial["token_accuracy"]
+
+
 def test_train_sft_invalid_accumulation(tmp_path, tiny_training_setup):
     data_path = _make_supervised_file(tmp_path)
     out_dir = tmp_path / "weights"
@@ -144,6 +169,31 @@ def test_train_reward_model_runs(tmp_path, tiny_training_setup):
     assert Path(checkpoint).exists()
     state = torch.load(checkpoint, map_location="cpu")
     assert "score.weight" in state
+
+
+def test_train_reward_model_reduces_loss(tmp_path, tiny_training_setup):
+    torch.manual_seed(1)
+    preference_path = _make_preferences_file(tmp_path)
+    out_path = tmp_path / "reward.pt"
+    metrics: list[dict[str, float]] = []
+
+    train_rm.train_reward_model(
+        str(preference_path),
+        out_path=str(out_path),
+        batch_size=2,
+        epochs=4,
+        lr=1e-3,
+        grad_accumulation_steps=1,
+        init_path=None,
+        device=torch.device("cpu"),
+        metrics=metrics,
+    )
+
+    assert metrics and metrics[0]["epoch"] == 0
+    final = metrics[-1]
+    initial = metrics[0]
+    assert final["loss"] < initial["loss"]
+    assert final["preference_accuracy"] >= initial["preference_accuracy"]
 
 
 def test_train_reward_model_invalid_accumulation(tmp_path, tiny_training_setup):
@@ -201,6 +251,145 @@ def test_train_ppo_runs(tmp_path, tiny_training_setup):
     assert Path(checkpoint).exists()
     state = torch.load(checkpoint, map_location="cpu")
     assert "token_embed.weight" in state
+
+
+def test_ppo_train_step_improves_policy(tmp_path, tiny_training_setup):
+    torch.manual_seed(2)
+    preference_path = _make_preferences_file(tmp_path)
+    config = tiny_training_setup()
+
+    dataset = data.PreferenceDataset(preference_path, block_size=config.block_size)
+    tokenizer_bundle = dataset.tokenizer_bundle
+    row = dataset[0]
+
+    def build_sample(policy_model, trainer_obj):
+        prompt_mask = row["prompt_mask"]
+        chosen = row["chosen"]
+        chosen_mask = row["chosen_mask"].float()
+
+        prompt_length = int(prompt_mask.sum().item())
+        chosen_length = int(row["chosen_mask"].sum().item())
+        response_length = max(chosen_length - prompt_length, 0)
+        assert response_length > 0, "synthetic preference row must contain a response"
+
+        responses = torch.full((1, response_length), tokenizer_bundle.pad, dtype=torch.long)
+        responses_mask = torch.zeros((1, response_length), dtype=torch.float32)
+        actual_response = chosen[prompt_length:prompt_length + response_length]
+        responses[0, :response_length] = actual_response
+        responses_mask[0, :response_length] = 1.0
+
+        full = chosen.unsqueeze(0)
+        full_mask = chosen_mask.unsqueeze(0)
+
+        response_mask = torch.zeros_like(full_mask)
+        response_mask[0, prompt_length:prompt_length + response_length] = 1.0
+
+        prompt_lengths = torch.tensor([prompt_length], dtype=torch.long)
+        response_lengths = torch.tensor([response_length], dtype=torch.long)
+
+        hidden = policy_model.transform(full, attention_mask=full_mask)
+        logits = policy_model.head(hidden)
+        log_probs = F.log_softmax(logits, dim=-1)
+        old_log_probs = train_ppo.gather_response_log_probs(
+            log_probs, responses, prompt_lengths, response_lengths
+        )
+        old_values = trainer_obj.compute_values(hidden, full_mask)
+
+        return {
+            "full": full,
+            "full_mask": full_mask,
+            "responses": responses,
+            "responses_mask": responses_mask,
+            "prompt_lengths": prompt_lengths,
+            "response_lengths": response_lengths,
+            "old_log_probs": old_log_probs.detach(),
+            "old_values": old_values.detach(),
+            "response_mask": response_mask,
+        }
+
+    # Value head should move toward the reward when policy gradients are disabled.
+    value_policy = gpt.GPT(config)
+    value_reference = gpt.GPT(config)
+    value_reference.load_state_dict(value_policy.state_dict())
+    value_head = train_ppo.ValueHead(config.n_embd)
+    value_policy.add_module("value_head", value_head)
+    reward_model = train_rm.ScalarHead(config)
+
+    value_trainer = train_ppo.PPOTrainer(
+        value_policy,
+        value_reference,
+        value_head,
+        reward_model,
+        pad_token=tokenizer_bundle.pad,
+        lr=1e-3,
+    )
+
+    for name, param in value_policy.named_parameters():
+        if not name.startswith("value_head"):
+            param.requires_grad_(False)
+
+    value_sample = build_sample(value_policy, value_trainer)
+    value_sample["advantages"] = torch.zeros_like(value_sample["old_values"])
+    value_sample["rewards"] = value_sample["old_values"] + 1.0
+
+    value_trainer.train_step(value_sample)
+    with torch.no_grad():
+        new_hidden = value_policy.transform(
+            value_sample["full"], attention_mask=value_sample["full_mask"]
+        )
+        new_values = value_trainer.compute_values(new_hidden, value_sample["full_mask"])
+
+    old_error = (value_sample["old_values"] - value_sample["rewards"]).abs().mean()
+    new_error = (new_values - value_sample["rewards"]).abs().mean()
+    assert float(new_error.item()) < float(old_error.item())
+
+    # Policy loss should decrease when value head updates are disabled.
+    policy_model = gpt.GPT(config)
+    policy_reference = gpt.GPT(config)
+    policy_reference.load_state_dict(policy_model.state_dict())
+    policy_value_head = train_ppo.ValueHead(config.n_embd)
+    policy_model.add_module("value_head", policy_value_head)
+
+    policy_trainer = train_ppo.PPOTrainer(
+        policy_model,
+        policy_reference,
+        policy_value_head,
+        reward_model,
+        pad_token=tokenizer_bundle.pad,
+        lr=1e-3,
+    )
+
+    for param in policy_value_head.parameters():
+        param.requires_grad_(False)
+
+    policy_sample = build_sample(policy_model, policy_trainer)
+    policy_sample["advantages"] = torch.ones_like(policy_sample["old_values"])
+    policy_sample["rewards"] = policy_sample["old_values"]
+
+    def compute_policy_loss(sample: dict[str, torch.Tensor]) -> float:
+        hidden = policy_model.transform(sample["full"], attention_mask=sample["full_mask"])
+        logits = policy_model.head(hidden)
+        log_probs = F.log_softmax(logits, dim=-1)
+        with torch.no_grad():
+            ref_logits, _ = policy_reference(sample["full"], attention_mask=sample["full_mask"])
+            ref_log_probs = F.log_softmax(ref_logits, dim=-1)
+        policy_loss, _, _ = policy_trainer.compute_policy_losses(
+            log_probs,
+            ref_log_probs,
+            sample["responses"],
+            sample["prompt_lengths"],
+            sample["response_lengths"],
+            sample["responses_mask"],
+            sample["response_mask"],
+            sample["advantages"],
+            sample["old_log_probs"],
+        )
+        return float(policy_loss.item())
+
+    before = compute_policy_loss(policy_sample)
+    policy_trainer.train_step(policy_sample)
+    after = compute_policy_loss(policy_sample)
+    assert after < before
 
 
 def test_train_ppo_missing_files(tmp_path, tiny_training_setup):
