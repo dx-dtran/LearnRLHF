@@ -1,8 +1,10 @@
 import os
 import sys
 
-import torch
-from torch.autograd import gradcheck
+import pytest
+
+torch = pytest.importorskip("torch")
+gradcheck = pytest.importorskip("torch.autograd").gradcheck
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.append(ROOT)

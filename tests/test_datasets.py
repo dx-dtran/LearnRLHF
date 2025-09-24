@@ -3,7 +3,9 @@ import os
 import sys
 import tempfile
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.append(ROOT)
