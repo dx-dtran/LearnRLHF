@@ -1,204 +1,122 @@
-import time
+"""
+train_sft.py — Supervised Fine-Tuning.
+
+Modules this file covers:
+    2.2  Masked causal-LM loss
+    2.4  SFT training loop
+    2.5  (invoked via eval.py)
+
+The InstructGPT-style SFT objective: standard next-token cross-entropy, but ONLY on
+assistant-content tokens. Zero gradient through user/system/scaffold tokens.
+
+Derivation (put in notes/02-sft.md before implementing):
+    For a single example of length T with mask m in {0,1}^T:
+        L = - (1/N) Σ_t  m_t · log p_θ(y_t | x_<t),       N = Σ_t m_t
+    Let ℓ_t = CE per position. Then ∂L/∂logits_t = m_t · (softmax(logits_t) - onehot(y_t)) / N.
+    Per-batch, average over examples (we average token-level across the batch, not per
+    example — the usual choice; note it weights long responses more).
+"""
+
+from typing import Tuple
+
 import torch
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import CosineAnnealingLR
-import logging
-from datetime import datetime
-import os
-from sft_data import SupervisedFineTuningDataset, collate_fn
-from gpt import GPT, GPTConfig, transpose_specific_layers
+import torch.nn as nn
+import torch.nn.functional as F
 
 
-def setup_logger():
-    timestamp = datetime.now().strftime("%m-%d-%Y-%H-%M-%S")
-    log_file = f"training-{timestamp}.log"
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
-    )
-    return logging.getLogger(), timestamp
+# =====================================================================================
+# Problem 2.2 — Masked SFT loss
+# =====================================================================================
+
+def sft_loss(
+    logits: torch.Tensor,   # (B, T, V)
+    labels: torch.Tensor,   # (B, T)   long
+    loss_mask: torch.Tensor,  # (B, T) float, 1 on positions we score
+) -> torch.Tensor:
+    """
+    Mean next-token cross-entropy over positions where loss_mask == 1.
+
+    Implementation:
+        logp = F.log_softmax(logits, dim=-1)                  # (B,T,V)
+        nll  = -logp.gather(-1, labels.unsqueeze(-1)).squeeze(-1)  # (B,T)
+        loss = (nll * loss_mask).sum() / loss_mask.sum().clamp_min(1.0)
+        return loss
+
+    Do NOT use `F.cross_entropy(..., ignore_index=-100)`. We want an EXPLICIT mask
+    multiplication so the gradient path is visible.
+
+    TODO(2.2): implement.
+
+    Your gradient test (tests/test_grad_sft.py::test_sft_loss_grad):
+        - fp64 tiny logits
+        - autograd vs centered-difference; rel err < 1e-5
+        - flipping a masked-out label must NOT change the loss
+    """
+    raise NotImplementedError("TODO(2.2): sft_loss")
 
 
-def estimate_val_loss(model, dataloader, device, logger, num_batches=10):
-    model.eval()
-    total_loss = 0.0
-    with torch.no_grad():
-        for i, batch in enumerate(dataloader):
-            if i >= num_batches:
-                break
+# =====================================================================================
+# Problem 2.4 — SFT training loop (skeleton)
+# =====================================================================================
 
-            input_ids = batch["input_ids"].to(device)
-            target_ids = batch["target_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
+def build_optimizer(
+    model: nn.Module,
+    lr: float,
+    weight_decay: float,
+    betas: tuple,
+) -> torch.optim.Optimizer:
+    """
+    Build AdamW with the nanoGPT convention: weight-decay only on 2D parameters
+    (no decay on LayerNorm weights, biases, embedding weights [debatable — GPT-2 often
+    keeps decay on embeddings; here we'll exclude them to match nanoGPT]).
 
-            logits, loss = model(
-                input_ids, targets=target_ids, attention_mask=attention_mask
-            )
-
-            total_loss += loss.item()
-
-    average_loss = total_loss / min(len(dataloader), num_batches)
-    logger.info(f"Validation Subset Loss: {average_loss:.4f}")
-    return average_loss
-
-
-def calculate_val_loss(model, dataloader, device, logger):
-    model.eval()
-    total_loss = 0.0
-    with torch.no_grad():
-        for batch in dataloader:
-            input_ids = batch["input_ids"].to(device)
-            target_ids = batch["target_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-
-            logits, loss = model(
-                input_ids, targets=target_ids, attention_mask=attention_mask
-            )
-
-            total_loss += loss.item()
-
-    average_loss = total_loss / len(dataloader)
-    logger.info(f"Full Validation Loss: {average_loss:.4f}")
-    return average_loss
+    TODO(2.4): split model.parameters() into two groups:
+        decay  = [p for p in params if p.requires_grad and p.dim() >= 2]
+        nodecay = the rest
+    and build AdamW with those two groups.
+    """
+    raise NotImplementedError("TODO(2.4): build_optimizer")
 
 
-def train(
-    model,
-    train_dataloader,
-    val_dataloader,
-    optimizer,
-    scheduler,
-    device,
-    num_epochs,
-    logger,
-    timestamp,
-    val_interval=100,
-    save_interval=1000,
-    accumulation_steps=4,
-):
+def cosine_lr(step: int, warmup: int, total: int, peak: float, min_ratio: float) -> float:
+    """
+    Linear warmup to `peak` over `warmup` steps, then cosine decay to `peak * min_ratio`
+    over the remaining `total - warmup` steps.
 
-    weights_dir = f"weights_{timestamp}"
-    os.makedirs(weights_dir, exist_ok=True)
-
-    global_step = 0
-
-    for epoch in range(num_epochs):
-        model.train()
-        epoch_loss = 0.0
-        accumulated_loss = 0.0
-        start_time = time.time()
-        optimizer.zero_grad()
-
-        for batch_idx, batch in enumerate(train_dataloader):
-
-            input_ids = batch["input_ids"].to(device)
-            target_ids = batch["target_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-
-            logits, loss = model(
-                input_ids, targets=target_ids, attention_mask=attention_mask
-            )
-            unscaled_loss = loss.item()
-            loss = loss / accumulation_steps
-            loss.backward()
-
-            accumulated_loss += unscaled_loss
-
-            if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(
-                train_dataloader
-            ):
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-
-                global_step += 1
-
-                avg_loss = accumulated_loss / accumulation_steps
-                elapsed_time = time.time() - start_time
-                logger.info(
-                    f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_dataloader)}], Global Step [{global_step}], Avg Loss: {avg_loss:.6f}, LR: {scheduler.get_last_lr()[0]:.8f}, Time: {elapsed_time:.2f}s"
-                )
-
-                accumulated_loss = 0.0
-                start_time = time.time()
-
-                if global_step % val_interval == 0:
-                    logger.info(
-                        f"Running validation subset at Epoch {epoch+1}, Global Step {global_step}"
-                    )
-                    estimate_val_loss(model, val_dataloader, device, logger)
-
-                if global_step % save_interval == 0:
-                    weights_path = os.path.join(
-                        weights_dir, f"gpt2_sft_{epoch+1}_{global_step}.pt"
-                    )
-                    torch.save(model.state_dict(), weights_path)
-                    logger.info(f"Saved model weights to {weights_path}")
-
-        logger.info(
-            f"Epoch [{epoch+1}/{num_epochs}] completed. Average Loss: {epoch_loss / len(train_dataloader):.4f}"
-        )
-
-        logger.info(f"Starting full validation for Epoch {epoch+1}")
-        calculate_val_loss(model, val_dataloader, device, logger)
+    TODO(2.4): implement. Should be pure math, no state.
+    """
+    raise NotImplementedError("TODO(2.4): cosine_lr")
 
 
-def main():
-    logger, timestamp = setup_logger()
+def train_sft():
+    """
+    Full loop:
+        - load SFTConfig from config.py
+        - instantiate GPT and load HF weights
+        - build SFTDataset + DataLoader
+        - build optimizer + scheduler
+        - for epoch in epochs:
+            for step, batch in enumerate(loader):
+                with torch.autocast(..., dtype=torch.bfloat16):
+                    logits = model(batch["input_ids"], batch["attention_mask"])
+                    loss = sft_loss(logits[:, :-1], batch["labels"][:, :-1], batch["loss_mask"][:, :-1])
+                (loss / accum).backward()
+                if (step+1) % accum == 0:
+                    clip_grad_norm_(1.0); optim.step(); optim.zero_grad()
+                    update lr each micro-step or each optim-step (pick one — document)
+                if step % eval_every == 0: run eval on a fixed subset of the held-out split
+        - save to sft.pt
 
-    train_file = "train.jsonl"
-    test_file = "test.jsonl"
-    pretrained_weights = "gpt2.pt"
-    block_size = 1024
-    batch_size = 8
-    learning_rate = 5e-5
-    num_epochs = 3
-    accumulation_steps = 4
+    Note on the shift in the loss call: the loader already returns labels as
+    input_ids[t+1], but by convention we compute logits over positions [0..T-1] and
+    labels over [0..T-1] aligned (both shifted), hence the `[:, :-1]` slice on logits
+    when labels are already shifted. If your collate does the shift inside, drop the
+    slice. BE EXPLICIT with a comment.
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device}")
-
-    train_dataset = SupervisedFineTuningDataset(train_file, block_size=block_size)
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn
-    )
-
-    val_dataset = SupervisedFineTuningDataset(test_file, block_size=block_size)
-    val_dataloader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
-    )
-
-    config = GPTConfig()
-    model = GPT(config).to(device)
-
-    if pretrained_weights:
-        state_dict = torch.load(pretrained_weights, map_location="cpu")
-        state_dict_transposed = transpose_specific_layers(state_dict)
-        model.load_state_dict(state_dict_transposed, strict=False)
-
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-
-    total_global_steps = (len(train_dataloader) // accumulation_steps) * num_epochs
-    scheduler = CosineAnnealingLR(optimizer, T_max=total_global_steps)
-
-    train(
-        model,
-        train_dataloader,
-        val_dataloader,
-        optimizer,
-        scheduler,
-        device,
-        num_epochs,
-        logger,
-        timestamp,
-        val_interval=100,
-        save_interval=1000,
-        accumulation_steps=accumulation_steps,
-    )
+    TODO(2.4): implement. Keep it simple — a few dozen lines.
+    """
+    raise NotImplementedError("TODO(2.4): train_sft")
 
 
 if __name__ == "__main__":
-    main()
+    train_sft()

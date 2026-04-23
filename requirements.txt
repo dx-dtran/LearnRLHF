@@ -1,3 +1,7 @@
 torch
 tiktoken
+datasets
+numpy
 matplotlib
+tqdm
+pytest
