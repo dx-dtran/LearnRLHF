@@ -5,7 +5,9 @@
 Theory packet for Problems 4.5, 4.6, and 4.7. Derive and reason about the three
 terms that make up the PPO loss:
 
-    L_PPO = L_policy + c_v * L_value - c_entropy * H
+\[
+L_{\mathrm{PPO}} = L_{\mathrm{policy}} + c_v L_{\mathrm{value}} - c_{\mathrm{entropy}} H
+\]
 
 By the end you should be able to:
 
@@ -21,7 +23,9 @@ By the end you should be able to:
 
 Recall from `04-ppo-gae.md` that the policy gradient with advantage baseline is:
 
-    grad J = E_{tau ~ pi_theta} [ sum_t grad log pi_theta(a_t | s_t) * A_t ]
+\[
+\nabla J(\theta)=\mathbb{E}_{\tau\sim\pi_{\theta}}\!\left[\sum_t \nabla \log \pi_{\theta}(a_t\mid s_t)\,A_t\right]
+\]
 
 **The problem.** To estimate this gradient, we need trajectories from the *current*
 policy `pi_theta`. But rolling out a batch of trajectories is expensive — each
@@ -34,12 +38,16 @@ expectation is no longer correct for the new policy.
 `pi_old`, frozen at the start of the current outer iteration. We rewrite the
 objective as an expectation under `pi_old` with an importance weight:
 
-    J(theta) = E_{tau ~ pi_old} [ sum_t rho_t(theta) * A_t ]
+\[
+J(\theta)=\mathbb{E}_{\tau\sim\pi_{\mathrm{old}}}\!\left[\sum_t \rho_t(\theta)\,A_t\right]
+\]
 
 where the **importance ratio** is:
 
-    rho_t(theta) = pi_theta(a_t | s_t) / pi_old(a_t | s_t)
-                 = exp( log pi_theta(a_t | s_t) - log pi_old(a_t | s_t) )
+\[
+\rho_t(\theta)=\frac{\pi_{\theta}(a_t\mid s_t)}{\pi_{\mathrm{old}}(a_t\mid s_t)}
+=\exp\!\big(\log \pi_{\theta}(a_t\mid s_t)-\log \pi_{\mathrm{old}}(a_t\mid s_t)\big)
+\]
 
 As long as `pi_theta` stays close to `pi_old`, the gradient of this rewritten
 expression equals the policy gradient.
@@ -57,19 +65,25 @@ the batch while preventing the policy from moving too far per update.
 
 For each token, define two candidate surrogates:
 
-    surr1 = rho * A
-    surr2 = clip(rho, 1 - epsilon, 1 + epsilon) * A
+\[
+\mathrm{surr}_1 = \rho A,\qquad
+\mathrm{surr}_2 = \mathrm{clip}(\rho, 1-\epsilon, 1+\epsilon)A
+\]
 
 where `clip(x, lo, hi)` pins `x` to the range `[lo, hi]`. `epsilon` is typically
 0.2.
 
 The PPO per-token loss is:
 
-    L_clip_t = - min(surr1, surr2)
+\[
+L_t^{\mathrm{clip}}=-\min(\mathrm{surr}_1,\mathrm{surr}_2)
+\]
 
 And the total policy loss:
 
-    L_policy = (1 / N) * sum over (b, t) of mask[b, t] * L_clip[b, t]
+\[
+L_{\mathrm{policy}}=\frac{1}{N}\sum_{b,t}\mathrm{mask}_{b,t}\,L_{b,t}^{\mathrm{clip}}
+\]
 
 where `N` is the count of masked-in response tokens.
 
@@ -110,7 +124,12 @@ For the unclipped case, the per-token loss is `L = -rho * A`. Using
 
 So:
 
-    d L / d log pi_theta = -A * rho
+\[
+\frac{\partial L}{\partial \log \pi_{\theta}} = -A\rho
+\]
+
+Simple intuition: `A` says whether to increase or decrease the chosen action's
+log-probability, while `\rho` sets how aggressively we do it.
 
 At `rho = 1` (on-policy limit), this simplifies to `-A`, which recovers the
 vanilla policy gradient direction.
@@ -118,9 +137,23 @@ vanilla policy gradient direction.
 For the clipped case, `surr2 = (a constant with respect to theta) * A`. The
 clip saturates, so changing `log pi_theta` doesn't change `surr2`. Therefore:
 
-    d L / d log pi_theta = 0
+\[
+\frac{\partial L}{\partial \log \pi_{\theta}} = 0
+\]
 
 That token contributes zero signal to this gradient step.
+
+Equivalent code shape (for one token) is:
+
+```python
+ratio = torch.exp(logp_new - logp_old)
+surr1 = ratio * adv
+surr2 = torch.clamp(ratio, 1 - eps, 1 + eps) * adv
+loss_tok = -torch.minimum(surr1, surr2)
+```
+
+This is a useful "math-to-code" checkpoint: each symbol in the derivation has a
+one-line implementation, and the clipping behavior is visually obvious.
 
 Verify this with an **edge test** in Problem 4.5. Set every ratio to a large
 value (say `rho = 5`) and `A > 0`. Every token should land in the "A > 0,
@@ -232,37 +265,53 @@ near zero, generations getting repetitive), bump it to `0.01`.
 
 For one position, the entropy of the per-token distribution `p` over the vocab is:
 
-    H(p) = - sum over v of p[v] * log p[v]
+\[
+H(p) = -\sum_v p_v \log p_v
+\]
 
 For a batch of positions:
 
-    H_batch = (1 / N) * sum over (b, t) of mask[b, t] * H(p[b, t])
+\[
+H_{\mathrm{batch}}=\frac{1}{N}\sum_{b,t}\mathrm{mask}_{b,t}\,H(p_{b,t})
+\]
 
 ### 4.3 Gradient of `H` with respect to logits
 
 Let `z` be the logits and `p = softmax(z)`. Using the softmax derivative
 `d p[v] / d z[u] = p[v] * (delta(v, u) - p[u])` from `02-sft.md`:
 
-    d H / d z[u]
-    = - sum over v of (d p[v] / d z[u]) * (log p[v] + 1)
-    = - sum over v of p[v] * (delta(v, u) - p[u]) * (log p[v] + 1)
+\[
+\frac{\partial H}{\partial z_u}
+=-\sum_v \frac{\partial p_v}{\partial z_u}(\log p_v + 1)
+=-\sum_v p_v\big(\mathbf{1}[v=u]-p_u\big)(\log p_v+1)
+\]
 
 Expand:
 
-    = - p[u] * (log p[u] + 1)  +  p[u] * sum over v of p[v] * (log p[v] + 1)
+\[
+=-p_u(\log p_u+1)+p_u\sum_v p_v(\log p_v+1)
+\]
 
 The sum on the right equals `-H + 1`, since `sum_v p[v] * log p[v] = -H` and
 `sum_v p[v] = 1`. So:
 
-    d H / d z[u]
-    = - p[u] * (log p[u] + 1)  +  p[u] * (-H + 1)
-    = - p[u] * (log p[u] + H)
+\[
+\frac{\partial H}{\partial z_u}
+=-p_u(\log p_u+1)+p_u(-H+1)
+=-p_u(\log p_u+H)
+\]
 
 In vector form:
 
-    d H / d z  =  - p * (log p + H)
+\[
+\nabla_z H = -p \odot (\log p + H)
+\]
 
-(elementwise product).
+where `\odot` means elementwise product.
+
+Analogy: entropy is like "spread." If probability gets too concentrated on one
+token, this gradient behaves like a spring that pulls the distribution back toward
+a broader shape.
 
 ### 4.4 Sanity check
 

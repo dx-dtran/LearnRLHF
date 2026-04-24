@@ -57,18 +57,28 @@ From now on when we say "position `t`" we mean the shifted frame — so the mode
 logits at position `t` predict `labels[t]`, and `loss_mask[t]` tells us whether that
 prediction counts toward the loss.
 
-### 2.2 Per-token cross-entropy
+### 2.2 Per-token cross-entropy (LaTeX + code view)
 
 At each position `t`, the model outputs a logit vector of length `V` (vocab size).
 Softmax converts logits to a probability distribution over the vocabulary:
 
-    p[t, v] = exp(logit[t, v]) / sum over v' of exp(logit[t, v'])
+\[
+p_{t,v}=\frac{e^{z_{t,v}}}{\sum_{j=1}^{V} e^{z_{t,j}}}
+\]
+
+where `z` is just the logits tensor (`z == logits` in code).
 
 The cross-entropy loss at position `t` is the negative log-probability the model
 assigns to the true next token `y_t = labels[t]`:
 
-    ell[t] = -log p[t, y_t]
-           = -logit[t, y_t] + log(sum over v' of exp(logit[t, v']))
+\[
+\ell_t=-\log p_{t,y_t}
+=-z_{t,y_t}+\log\!\left(\sum_{j=1}^{V} e^{z_{t,j}}\right)
+\]
+
+Quick intuition: logits are like raw "scores" for every token, softmax converts
+scores into odds, and cross-entropy measures how surprised we are by the correct
+token. Low surprise means good prediction.
 
 The second form is what you actually compute — subtract the correct token's logit
 from the log-sum-exp of all logits. Never compute the softmax first and then take
@@ -78,9 +88,16 @@ its log; that's numerically unstable.
 
 Summing across a batch of examples:
 
-    L_SFT = sum over (b, t) of { m[b, t] * ell[b, t] }  /  N_resp
+\[
+L_{\text{SFT}}=
+\frac{\sum_{b,t} m_{b,t}\,\ell_{b,t}}
+{\sum_{b,t} m_{b,t}}
+=
+\frac{\sum_{b,t} m_{b,t}\,\ell_{b,t}}
+{N_{\text{resp}}}
+\]
 
-where `N_resp = sum over (b, t) of m[b, t]` is the total number of assistant tokens
+where \(N_{\text{resp}}=\sum_{b,t} m_{b,t}\) is the total number of assistant tokens
 in the batch.
 
 Dividing by `N_resp` (instead of by `B * T` or anything else) means the loss scale
@@ -153,15 +170,23 @@ where `delta(v, u)` is 1 if `v == u` and 0 otherwise. You get this by differenti
 `p[v] = exp(z[v]) / sum(exp(z))` and applying the quotient rule — worth doing once
 by hand.
 
-### 4.3 Chain rule
+### 4.3 Chain rule (step-by-step, lighter notation)
 
-    d ell / d z[u]  =  -1/p[y] * d p[y] / d z[u]
-                    =  -1/p[y] * p[y] * (delta(y, u) - p[u])
-                    =  p[u] - delta(y, u)
+\[
+\frac{\partial \ell}{\partial z_u}
+=
+-\frac{1}{p_y}\frac{\partial p_y}{\partial z_u}
+=
+-\frac{1}{p_y}\,p_y\left(\mathbf{1}[u=y]-p_u\right)
+=
+p_u-\mathbf{1}[u=y]
+\]
 
 So in vector form:
 
-    d ell / d z  =  p - onehot(y)
+\[
+\nabla_z \ell = p-\mathrm{onehot}(y)
+\]
 
 Read this out loud: **"the gradient is the model's predicted distribution minus a
 delta spike on the correct class."**
@@ -169,13 +194,21 @@ delta spike on the correct class."**
 Interpretation: the gradient subtracts probability mass from the true class and adds
 it to every other class, proportional to what the model currently predicts. A
 gradient step (minus this direction) pushes mass *toward* the correct class and *away
-from* every wrong class. Beautifully simple.
+from* every wrong class.
+
+Analogy: this is like rebalancing a budget where the "correct class" account should
+hold all the money. Classes with too much probability get debited, and the true
+class gets credited.
 
 ### 4.4 With the mask
 
 Across positions `t`, with the mask factored in:
 
-    d L_SFT / d z[t]  =  (m[t] / N_resp) * (p[t] - onehot(y[t]))
+\[
+\frac{\partial L_{\text{SFT}}}{\partial z_t}
+=
+\frac{m_t}{N_{\text{resp}}}\left(p_t-\mathrm{onehot}(y_t)\right)
+\]
 
 Three things worth noticing:
 
