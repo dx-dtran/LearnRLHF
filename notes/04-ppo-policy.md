@@ -2,58 +2,52 @@
 
 ## Purpose
 
-Theory for Problems 4.5, 4.6, and 4.7. Derive and reason about the three terms in the
-PPO optimization objective:
+Theory packet for Problems 4.5, 4.6, and 4.7. Derive and reason about the three
+terms that make up the PPO loss:
 
-$$
-\mathcal{L}_\text{PPO}(\theta) = \mathcal{L}_\pi(\theta) + c_v \cdot \mathcal{L}_V(\theta) - c_\text{ent} \cdot H(\theta).
-$$
+    L_PPO = L_policy + c_v * L_value - c_entropy * H
 
 By the end you should be able to:
 
 1. State the PPO clipped policy loss and derive its piecewise gradient.
-2. Explain why the clipped ratio provides a "trust region" without actually solving
-   one.
-3. Derive the clipped value loss and explain why the clipping helps early in
-   training.
+2. Explain why clipping the importance ratio gives us a "trust region" without
+   actually solving a constrained optimization problem.
+3. Derive the clipped value loss and explain why the clip helps early in training.
 4. Derive the gradient of the masked entropy term.
 
 ---
 
-## 1. The setup: importance-sampled policy gradient
+## 1. Setup: importance-sampled policy gradient
 
-Recall from `04-ppo-gae.md`: the vanilla policy gradient is
+Recall from `04-ppo-gae.md` that the policy gradient with advantage baseline is:
 
-$$
-\nabla_\theta J = \mathbb{E}_{\tau \sim \pi_\theta}\!\left[\sum_t \nabla \log \pi_\theta(a_t \mid s_t) \cdot A_t\right].
-$$
+    grad J = E_{tau ~ pi_theta} [ sum_t grad log pi_theta(a_t | s_t) * A_t ]
 
-**Problem**: to compute this gradient we need rollouts from the *current* policy
-$\pi_\theta$. If we want to reuse a batch of rollouts for multiple gradient steps (to
-amortize the cost of generation), the rollouts quickly become "off-policy" and the
-expectation is wrong.
+**The problem.** To estimate this gradient, we need trajectories from the *current*
+policy `pi_theta`. But rolling out a batch of trajectories is expensive — each
+rollout requires a full autoregressive generation. We'd really like to reuse each
+batch of rollouts for several gradient steps to amortize that cost. Once the
+policy has been updated a few times, though, the rollouts are "off-policy" and the
+expectation is no longer correct for the new policy.
 
-**Fix**: importance sampling. Rollouts come from a *snapshot* policy $\pi_\text{old}$
-(frozen at the start of each outer iteration). We rewrite the objective as
+**The fix.** Importance sampling. The rollouts come from a snapshot policy
+`pi_old`, frozen at the start of the current outer iteration. We rewrite the
+objective as an expectation under `pi_old` with an importance weight:
 
-$$
-J(\theta) = \mathbb{E}_{\tau \sim \pi_\text{old}}\!\left[\sum_t \frac{\pi_\theta(a_t \mid s_t)}{\pi_\text{old}(a_t \mid s_t)} \cdot A_t\right],
-$$
+    J(theta) = E_{tau ~ pi_old} [ sum_t rho_t(theta) * A_t ]
 
-where the importance ratio
+where the **importance ratio** is:
 
-$$
-\rho_t(\theta) = \frac{\pi_\theta(a_t \mid s_t)}{\pi_\text{old}(a_t \mid s_t)}
-= \exp\bigl(\log \pi_\theta(a_t \mid s_t) - \log \pi_\text{old}(a_t \mid s_t)\bigr)
-$$
+    rho_t(theta) = pi_theta(a_t | s_t) / pi_old(a_t | s_t)
+                 = exp( log pi_theta(a_t | s_t) - log pi_old(a_t | s_t) )
 
-accounts for the distribution shift. Under mild conditions $\nabla_\theta$ on this
-expression equals $\nabla_\theta J$, as long as $\pi_\theta \approx \pi_\text{old}$.
+As long as `pi_theta` stays close to `pi_old`, the gradient of this rewritten
+expression equals the policy gradient.
 
-**The catch**: if $\pi_\theta$ drifts far from $\pi_\text{old}$, the ratios can be
-huge and the gradient estimator blows up with variance. This is the classic failure
-of importance sampling. We need a way to reuse the batch but prevent the policy
-from moving too far in one update.
+**The catch.** If `pi_theta` drifts far from `pi_old`, the ratios `rho_t` can
+become enormous or tiny, and the gradient estimator explodes with variance. Every
+importance-sampling method has this failure mode. We need some way to keep using
+the batch while preventing the policy from moving too far per update.
 
 ---
 
@@ -61,79 +55,92 @@ from moving too far in one update.
 
 ### 2.1 Definition
 
-$$
-\mathcal{L}_t^\text{clip}(\theta) = -\min\bigl(\rho_t(\theta) \cdot A_t, \; \text{clip}(\rho_t(\theta), 1 - \varepsilon, 1 + \varepsilon) \cdot A_t\bigr),
-$$
+For each token, define two candidate surrogates:
 
-$$
-\mathcal{L}_\pi(\theta) = \frac{1}{N} \sum_{b, t} m_{b, t} \cdot \mathcal{L}^\text{clip}_{b, t}(\theta).
-$$
+    surr1 = rho * A
+    surr2 = clip(rho, 1 - epsilon, 1 + epsilon) * A
 
-where $N$ is the count of real (masked-in) response tokens in the batch and
-$\varepsilon = 0.2$ is the clip range. Per token:
+where `clip(x, lo, hi)` pins `x` to the range `[lo, hi]`. `epsilon` is typically
+0.2.
 
-- $\text{surr}_1 = \rho A$ is the importance-sampled policy gradient objective.
-- $\text{surr}_2 = \text{clip}(\rho, 1-\varepsilon, 1+\varepsilon) \cdot A$ is the same
-  with $\rho$ pinned to $[1-\varepsilon, 1+\varepsilon]$.
-- We take the **min** inside the loss — i.e. the **pessimistic** one — so the policy
-  is not rewarded for running up the ratio beyond the clip in a direction that
-  increases the objective. *But* it is still allowed to pull the ratio back toward 1
-  when that would decrease the objective.
+The PPO per-token loss is:
 
-### 2.2 What "pessimistic" means, concretely
+    L_clip_t = - min(surr1, surr2)
 
-There are four cases based on the sign of $A_t$ and whether $\rho$ is inside the clip:
+And the total policy loss:
 
-| $A_t$ sign | $\rho$ position            | $\text{surr}_1$ vs $\text{surr}_2$        | min picks | Gradient w.r.t. $\log \pi$ |
-|------------|----------------------------|-----------------------------|-----------|----------------------------|
-| $A > 0$    | $\rho \in [1-\varepsilon, 1+\varepsilon]$ | equal                | $\text{surr}_1$  | $-A \cdot \rho$            |
-| $A > 0$    | $\rho > 1 + \varepsilon$   | $\text{surr}_1$ bigger (= $\rho A$) | $\text{surr}_2$  | **zero** (clipped)         |
-| $A > 0$    | $\rho < 1 - \varepsilon$   | $\text{surr}_1$ smaller            | $\text{surr}_1$  | $-A \cdot \rho$ (not clipped)|
-| $A < 0$    | $\rho \in [1-\varepsilon, 1+\varepsilon]$ | equal                | $\text{surr}_1$  | $-A \cdot \rho$            |
-| $A < 0$    | $\rho < 1 - \varepsilon$   | $\text{surr}_1$ less negative      | $\text{surr}_2$  | **zero** (clipped)         |
-| $A < 0$    | $\rho > 1 + \varepsilon$   | $\text{surr}_1$ more negative      | $\text{surr}_1$  | $-A \cdot \rho$ (not clipped)|
+    L_policy = (1 / N) * sum over (b, t) of mask[b, t] * L_clip[b, t]
 
-The pattern: **clipping only fires when it would drag the objective back** (i.e.
-the policy is already moving in a good direction and has gone "too far"). It *does
-not* fire when the ratio is on the wrong side — in those cases the unclipped branch
-provides gradient signal back toward the clip range.
+where `N` is the count of masked-in response tokens.
 
-### 2.3 Deriving the piecewise gradient (do this by hand)
+Read the `min` carefully: we take the **smaller** (more pessimistic) of the two
+surrogates, then *negate* the whole thing for the loss. Equivalently: inside the
+objective (before the negation), we take the *minimum* of `surr1` and `surr2`,
+i.e. the less favorable one. This is the key idea — the surrogate is set up so
+that the policy cannot be rewarded for running the ratio far outside
+`[1 - eps, 1 + eps]` in the direction of increasing the objective.
 
-For the unclipped case ($\text{surr}_1$ picked), the per-token loss is
-$\ell = -\rho A$. Using $\rho = \exp(\log \pi - \log \pi_\text{old})$:
+### 2.2 What "pessimistic" means, case by case
 
-$$
-\frac{\partial \rho}{\partial \log \pi} = \rho,
-\qquad
-\frac{\partial \ell}{\partial \log \pi} = -A \cdot \rho.
-$$
+There are essentially four cases based on the sign of `A` and where `rho` sits.
+Here's a compact table. "Gradient" means gradient of `L_clip_t` with respect to
+`log pi_theta(a_t | s_t)`.
 
-Equivalently, $\partial \ell / \partial \log \pi = -A$ when $\rho = 1$ — recovering the
-vanilla policy gradient in the on-policy limit.
+| `A` sign | `rho` position | which surrogate is smaller? | `min` picks | gradient |
+|----------|----------------|------------------------------|-------------|----------|
+| A > 0 | rho inside `[1-eps, 1+eps]` | equal | either | `-A * rho` |
+| A > 0 | rho > 1 + eps | `surr2` (clipped is smaller, since `rho*A` is bigger) | `surr2` | **0** (clipped) |
+| A > 0 | rho < 1 - eps | `surr1` (unclipped is smaller) | `surr1` | `-A * rho` |
+| A < 0 | rho inside `[1-eps, 1+eps]` | equal | either | `-A * rho` |
+| A < 0 | rho < 1 - eps | `surr2` | `surr2` | **0** (clipped) |
+| A < 0 | rho > 1 + eps | `surr1` | `surr1` | `-A * rho` |
 
-For the clipped case ($\text{surr}_2$ picked *and* it doesn't depend on $\theta$ in
-that regime — i.e. the clip is saturated): the argument of the clip has no gradient,
-so $\partial / \partial \log \pi = 0$. The token's gradient contribution is literally
-zero.
+The pattern: **the clip only fires when firing it would pull the objective back**.
+That is, when the policy is already moving in a good direction and has gone "too
+far". When the policy is moving in the wrong direction (ratio on the wrong side
+of 1), the clip *doesn't* fire, so we still get gradient signal pushing the ratio
+back toward 1.
 
-You verify this with an **edge test** in Problem 4.5: set all ratios to a large value
-($\rho = 5$, say) and $A > 0$. Every token should be in the "$A > 0$, $\rho > 1+\varepsilon$,
-clip picks $\text{surr}_2$" regime. Autograd must report exactly zero gradient on those
-tokens. If it reports nonzero, your implementation is using `max` instead of `min`
-or has a sign error.
+### 2.3 Deriving the piecewise gradient
 
-### 2.4 Why this works as a trust region substitute
+For the unclipped case, the per-token loss is `L = -rho * A`. Using
+`rho = exp(log pi_theta - log pi_old)`:
 
-The "clip fraction" (fraction of tokens where the clip fires) is typically 10–30% of
-tokens per iteration. When the clip fires, that token contributes zero signal to the
-update, so the effective gradient magnitude decreases as $\theta$ drifts farther from
-$\theta_\text{old}$. This acts like a soft trust region: small updates move freely,
-large updates get throttled automatically.
+    d rho / d log pi_theta = rho
 
-Contrast with TRPO (the predecessor), which solves a constrained optimization at every
-step with a conjugate-gradient solver — PPO gets comparable performance with a simple
-`min(surr1, surr2)` and a standard optimizer. That's why everyone uses PPO.
+So:
+
+    d L / d log pi_theta = -A * rho
+
+At `rho = 1` (on-policy limit), this simplifies to `-A`, which recovers the
+vanilla policy gradient direction.
+
+For the clipped case, `surr2 = (a constant with respect to theta) * A`. The
+clip saturates, so changing `log pi_theta` doesn't change `surr2`. Therefore:
+
+    d L / d log pi_theta = 0
+
+That token contributes zero signal to this gradient step.
+
+Verify this with an **edge test** in Problem 4.5. Set every ratio to a large
+value (say `rho = 5`) and `A > 0`. Every token should land in the "A > 0,
+rho > 1 + eps, clip active" regime. Autograd must report exactly zero gradient on
+those tokens. If any token has a nonzero gradient, you've got a `max` instead of
+`min`, or a sign error somewhere.
+
+### 2.4 Why this works as a trust region
+
+In practice, on a given update, some fraction of tokens hit the clip — this is
+the **clip fraction**, typically 10–30% in a healthy run. Clipped tokens
+contribute zero to the gradient, so the effective magnitude of the update
+*decreases* as `pi_theta` drifts further from `pi_old`. That gives us a soft
+self-regulating trust region: small updates move freely, large ones get throttled
+automatically.
+
+Contrast with TRPO, PPO's predecessor: TRPO solves a hard constrained
+optimization at every step with conjugate-gradient. PPO gets comparable
+performance with `min(surr1, surr2)` and a standard optimizer. That simplicity is
+why everyone uses PPO.
 
 ---
 
@@ -141,58 +148,66 @@ step with a conjugate-gradient solver — PPO gets comparable performance with a
 
 ### 3.1 Unclipped form
 
-The value head's job is to regress onto the GAE return $R_t = A_t + V_t^\text{old}$
-(which we computed at rollout time and treat as a constant):
+The value head's job is to regress toward the GAE return:
 
-$$
-\mathcal{L}_V^\text{unclipped}(\theta) = \frac{1}{2} \sum_{b, t} m_{b, t} \bigl(V_\theta(s_{b, t}) - R_{b, t}\bigr)^2 \Big/ N.
-$$
+    R_t = A_t + V_old(s_t)
 
-Straightforward MSE; gradient is $m \cdot (V - R) \cdot \partial V/\partial \theta$.
+which is computed at rollout time and treated as a constant during optimization
+(stop-gradient). The simplest value loss is plain MSE:
+
+    L_V_unclipped = (1 / (2*N)) * sum over (b, t) of mask[b, t] * (V_theta(s_t) - R_t)^2
+
+Gradient is `mask * (V_theta - R) * dV_theta/dtheta` — standard MSE.
 
 ### 3.2 Clipped form
 
-$$
-V_\theta^\text{clipped}(s_t) = V^\text{old}_t + \text{clip}\bigl(V_\theta(s_t) - V^\text{old}_t,\; -\varepsilon_v,\; +\varepsilon_v\bigr),
-$$
+The clipped value loss mirrors the policy clip. Define:
 
-$$
-\mathcal{L}_V(\theta) = \frac{1}{2} \sum_{b, t} m_{b, t} \cdot \max\!\bigl((V_\theta - R)^2,\; (V_\theta^\text{clipped} - R)^2\bigr) \Big/ N.
-$$
+    V_clipped(s_t) = V_old(s_t) + clip(V_theta(s_t) - V_old(s_t), -eps_v, +eps_v)
 
-Same "pessimistic" idea as the policy clip: whichever of $V_\theta$ or $V_\theta^\text{clipped}$
-is **farther** from the target $R$ determines the squared error. Why **max** (not
-min) here? Because squared error is a loss we want to *minimize*, and we want to
-pessimistically compute how bad the prediction is — i.e. use the larger of the two
-squared errors. That prevents $V_\theta$ from jumping too far in one update.
+Then:
 
-### 3.3 Why clip the value
+    per_tok_loss = 0.5 * max( (V_theta - R)^2, (V_clipped - R)^2 )
+    L_V = (1 / N) * sum over (b, t) of mask[b, t] * per_tok_loss[b, t]
 
-Early in PPO training, the policy is barely changing while the value head is
-catching up fast. Without clipping, the value can overshoot — predicting $V$ values
-that don't match the scale of future returns — and this wrecks the advantage
-estimates used by the policy loss (since the TD errors $\delta_t$ become garbage).
-Clipping $V$ per-update keeps the value estimate close to its own previous estimate,
-so advantages stay on a stable scale for the policy to consume.
+Same idea as the policy clip: the value can only move at most `eps_v` away from
+its snapshot value `V_old` per update. Why **max** here (instead of `min` in the
+policy case)? Because squared error is a loss we want to *minimize*, and we want
+to pessimistically pick the larger squared error — i.e. the worse of the two
+predictions — as our training loss. That keeps `V_theta` from jumping too far in
+any single update.
 
-In the on-policy limit ($V_\theta = V^\text{old}$), both branches give the same value
-and the clip has no effect. As $V_\theta$ drifts, the clip kicks in.
+### 3.3 Why clip the value at all
 
-### 3.4 Gradient
+Early in PPO training, the policy is barely moving while the value head is
+learning fast from scratch. Without clipping, the value head can overshoot —
+predicting return values that don't match the scale of actual future returns —
+and this wrecks the advantage estimates, since the TD errors `delta_t` become
+garbage. Then the policy loss feeds on garbage advantages and everything
+destabilizes.
 
-The gradient is piecewise linear in $V_\theta$:
+Clipping `V_theta` to stay within `eps_v` of its previous value keeps advantages
+on a stable scale across updates, at the cost of slower value learning.
 
-- Where $|V_\theta - V^\text{old}| \le \varepsilon_v$: the clip is inactive, and
-  $(V_\theta - R)^2$ and $(V_\theta^\text{clipped} - R)^2$ are equal. Gradient =
-  $m \cdot (V_\theta - R)$.
-- Where the clip is active: the clipped branch's gradient through
-  $V_\theta$ is zero (it was clipped). If the unclipped branch has the larger squared
-  error (max picks it), gradient = $m \cdot (V_\theta - R)$. Otherwise the max picks
-  the clipped branch, whose gradient w.r.t. $\theta$ is zero — no signal.
+In the on-policy limit (when `V_theta = V_old`), both branches of the max are
+equal and the clip has no effect. As `V_theta` drifts, the clip kicks in.
 
-The test in Problem 4.6: gradient-check the whole thing at fp64, and add a case where
-$V_\theta$ is far from $V^\text{old}$ and far from $R$ — check the gradient equals what
-you'd compute for the selected branch.
+### 3.4 Gradient of the clipped value loss
+
+Piecewise linear in `V_theta`:
+
+- Where `|V_theta - V_old| <= eps_v`: the clip is inactive,
+  `V_clipped = V_theta`, and the two branches of the max are equal. The gradient
+  is `mask * (V_theta - R)`.
+- Where the clip is active:
+  - The clipped branch `(V_clipped - R)^2` has no gradient through `V_theta`
+    (because `V_clipped` is pinned).
+  - The unclipped branch `(V_theta - R)^2` has the usual gradient.
+  - Whichever branch gets picked by `max` determines the gradient.
+
+Gradient-check the whole thing at fp64 in Problem 4.6. Include a case where
+`V_theta` is far from both `V_old` and `R` — make sure the gradient matches what
+you'd compute by hand for the selected branch.
 
 ---
 
@@ -200,102 +215,99 @@ you'd compute for the selected branch.
 
 ### 4.1 Purpose
 
-Adding an entropy term to the loss with negative sign
+Add the negated entropy of the policy to the loss:
 
-$$
--c_\text{ent} \cdot H(\pi_\theta) = -c_\text{ent} \cdot \mathbb{E}\!\left[-\sum_v \pi_\theta(v \mid s) \log \pi_\theta(v \mid s)\right]
-$$
+    L_total = L_policy + c_v * L_value - c_entropy * H(pi_theta)
 
-rewards policies that keep distributional "width". This prevents premature mode
-collapse — where the policy becomes deterministic (always picks the argmax) too
-early and stops exploring.
+The negative sign means a gradient step *increases* entropy — rewarding the policy
+for keeping its per-token distributions broad. This prevents **premature mode
+collapse**, where the policy becomes almost deterministic (always picks the
+argmax) early on and stops exploring alternatives.
 
-In our config: `entropy_coef = 0.0` by default. Start without; add a small amount
-(`0.01`) if you see the policy go deterministic within a few iterations (entropy
-dropping near zero, generations becoming repetitive).
+In our config, `c_entropy = 0.0` by default — we start without an entropy bonus.
+If you see the policy go deterministic within a few iterations (entropy dropping
+near zero, generations getting repetitive), bump it to `0.01`.
 
-### 4.2 Masked entropy over response tokens
+### 4.2 Masked entropy
 
-$$
-H(\pi_\theta) = \frac{1}{N} \sum_{b, t} m_{b, t} \cdot H\bigl(\pi_\theta(\cdot \mid s_{b, t})\bigr),
-$$
+For one position, the entropy of the per-token distribution `p` over the vocab is:
 
-where per-token entropy is
+    H(p) = - sum over v of p[v] * log p[v]
 
-$$
-H_t = -\sum_{v=1}^{V} \pi_\theta(v \mid s_t) \log \pi_\theta(v \mid s_t).
-$$
+For a batch of positions:
 
-### 4.3 Gradient of $H$ with respect to logits (derive this)
+    H_batch = (1 / N) * sum over (b, t) of mask[b, t] * H(p[b, t])
 
-Let $z \in \mathbb{R}^V$ be logits, $p = \text{softmax}(z)$. Using
-$\partial p_v / \partial z_u = p_v(\delta_{v, u} - p_u)$ from the SFT note:
+### 4.3 Gradient of `H` with respect to logits
 
-$$
-\frac{\partial H}{\partial z_u}
-= -\sum_v \frac{\partial p_v}{\partial z_u} (\log p_v + 1)
-= -\sum_v p_v(\delta_{v, u} - p_u)(\log p_v + 1).
-$$
+Let `z` be the logits and `p = softmax(z)`. Using the softmax derivative
+`d p[v] / d z[u] = p[v] * (delta(v, u) - p[u])` from `02-sft.md`:
 
-Expand the two terms in the parenthesis and simplify:
+    d H / d z[u]
+    = - sum over v of (d p[v] / d z[u]) * (log p[v] + 1)
+    = - sum over v of p[v] * (delta(v, u) - p[u]) * (log p[v] + 1)
 
-$$
-\frac{\partial H}{\partial z_u} = -p_u(\log p_u + 1) + p_u \sum_v p_v(\log p_v + 1)
-= -p_u \log p_u - p_u + p_u(- H + 1)
-= -p_u (\log p_u + H).
-$$
+Expand:
 
-So in vector form:
+    = - p[u] * (log p[u] + 1)  +  p[u] * sum over v of p[v] * (log p[v] + 1)
 
-$$
-\boxed{\; \frac{\partial H}{\partial z} = -\, p \odot \bigl(\log p + H\bigr). \;}
-$$
+The sum on the right equals `-H + 1`, since `sum_v p[v] * log p[v] = -H` and
+`sum_v p[v] = 1`. So:
+
+    d H / d z[u]
+    = - p[u] * (log p[u] + 1)  +  p[u] * (-H + 1)
+    = - p[u] * (log p[u] + H)
+
+In vector form:
+
+    d H / d z  =  - p * (log p + H)
+
+(elementwise product).
 
 ### 4.4 Sanity check
 
-At the uniform distribution $p_v = 1/V$: $\log p_v = -\log V$, $H = \log V$, and
-$\log p_v + H = -\log V + \log V = 0$. So $\partial H/\partial z = 0$ — entropy is
-stationary (maximized) at uniform. Good.
-
-At a near-deterministic $p$ (most mass on one class): $\log p_v$ is very negative for
-all but one $v$, and the gradient is highly nonzero in a direction that smooths the
-distribution. Also good.
+- **Uniform distribution** (`p[v] = 1/V` for all `v`): `log p[v] = -log V`,
+  `H = log V`, so `log p + H = 0`. The gradient is zero everywhere, meaning
+  entropy is stationary. Good — uniform is the maximum-entropy distribution, and
+  we'd expect zero gradient at the maximum.
+- **Near-deterministic** distribution: for the wrong classes, `log p[v]` is very
+  negative and the gradient is highly nonzero, pointing in a direction that
+  smooths the distribution back out. Good.
 
 ### 4.5 Test
 
-Gradient-check at fp64 on a small logits tensor. Apply the mask, verify that flipping
-logits outside the mask doesn't change the entropy value or its gradient.
+Gradient-check the entropy at fp64 on a small logits tensor. Apply the mask,
+verify that flipping logits *outside* the mask doesn't change the computed
+entropy or its gradient.
 
 ---
 
 ## 5. The full PPO loss
 
-Putting the three pieces together:
+Combine the three pieces:
 
-$$
-\mathcal{L}_\text{PPO} = \mathcal{L}_\pi + c_v \cdot \mathcal{L}_V - c_\text{ent} \cdot H.
-$$
+    L_PPO = L_policy + c_v * L_value - c_entropy * H
 
 Typical coefficients (our config):
 
-- $c_v = 0.5$: value loss has half the weight of policy loss.
-- $c_\text{ent} = 0.0$ (start), up to $0.01$ if needed.
-- $\varepsilon = 0.2$ for the policy ratio clip.
-- $\varepsilon_v = 0.2$ for the value clip.
+- `c_v = 0.5`: value loss has half the weight of the policy loss.
+- `c_entropy = 0.0` to start; raise to `0.01` if entropy collapses.
+- `epsilon = 0.2` for the policy ratio clip.
+- `epsilon_v = 0.2` for the value clip.
 
-Backward through the sum, clip gradients to norm 1.0, step the optimizer. Four epochs
-over the rollout batch (Problem 5.3) before throwing away the rollout and starting the
-next outer iteration.
+Backward through the sum, clip the gradient norm at 1.0, step the optimizer. Four
+epochs over the rollout batch (Problem 5.3) before you throw away the rollout and
+start the next outer iteration.
 
 ---
 
 ## 6. What to commit to `notes/04-ppo-policy.md`
 
-After finishing Problems 4.5, 4.6, 4.7, append:
+After Problems 4.5, 4.6, 4.7, add:
 
-- Your derivation of the clipped-surrogate piecewise gradient (the table in §2.2,
-  but with the algebra filled in).
-- Your derivation of the entropy gradient (redo §4.3 on paper).
-- The numerical result of your edge test: "with all ratios at 5 and A > 0, every
-  masked token's gradient is 0.0".
-- A note on what coefficients you tried and what happened.
+- Your own derivation of the clipped-surrogate piecewise gradient (the table in
+  §2.2, but with the algebra written out).
+- Your own derivation of the entropy gradient (section 4.3 redone by hand).
+- The numerical result of your edge test: "with every ratio set to 5 and A > 0,
+  each masked token's gradient was exactly 0.0".
+- A note on what coefficients you tried and what you saw happen.

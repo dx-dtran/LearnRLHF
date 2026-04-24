@@ -2,28 +2,34 @@
 
 ## Purpose
 
-Theory for Module 2 (Problems 2.1 through 2.5). By the end of this you should be able
-to:
+This is the theory packet for Module 2 (Problems 2.1 through 2.5). By the end you
+should be able to:
 
-1. Write the SFT loss in equations (and explain every symbol).
-2. Derive the gradient of softmax + cross-entropy with respect to the logits by hand.
-3. Explain *exactly* what the `loss_mask` is masking out and why.
+1. Write down the SFT loss and explain what every piece of it means in words.
+2. Derive the gradient of softmax + cross-entropy with respect to the logits on a
+   blank page.
+3. Explain exactly which tokens the `loss_mask` zeros out and why.
 
-SFT is the easiest of the three phases, but the masking logic is critical to get right.
-A single off-by-one or inverted mask here will propagate through everything downstream.
+SFT is the easiest of the three training phases. But the masking logic is *critical*.
+A single off-by-one or inverted mask here will quietly corrupt every downstream phase
+(RM and PPO both assume SFT was done correctly).
 
 ---
 
 ## 1. What SFT actually does
 
-We have a pretrained GPT-2 that models $P(x_t \mid x_{<t})$ on raw web text. We want
-a model that generates **assistant turns** that imitate the `chosen` responses from
-HH-RLHF. SFT = continue training with the same next-token objective, but on formatted
-dialogue data, and **only count loss on assistant tokens**.
+We start with a pretrained GPT-2. GPT-2 models the probability of the next token
+given the previous tokens, trained on web text. What we want is a GPT-2 that, when
+given a user's message in our ChatML format, produces an assistant reply that looks
+like the `chosen` responses from HH-RLHF.
 
-Think of it as next-token-prediction with a mask: the model sees the full dialogue,
-but the loss only "asks" it to predict the assistant's tokens. The prompt tokens are
-there as context, not as targets.
+SFT = keep the same next-token prediction objective, but train on formatted dialogues
+instead of raw web text, and **only count the loss on assistant tokens**.
+
+The mental model: the model sees the entire dialogue, but during training we only
+"grade" it on its predictions of assistant tokens. It can look at user messages for
+context, but we never ask it "predict the next user token" — user text is input,
+assistant text is the target.
 
 ---
 
@@ -31,150 +37,156 @@ there as context, not as targets.
 
 ### 2.1 Tokenized example
 
-One example: a full formatted dialogue tokenized to a sequence $x = (x_0, x_1, \dots, x_{T-1})$.
-Alongside, a binary mask $m = (m_0, m_1, \dots, m_{T-1}) \in \{0, 1\}^T$ where
-$m_t = 1$ iff **the target at position $t$ is an assistant token**.
+One example is one full formatted dialogue, tokenized to a sequence
+`x = [x_0, x_1, ..., x_{T-1}]`.
 
-"Target at position $t$" is $x_{t+1}$ under the next-token convention — position $t$'s
-logits predict position $t+1$'s token. So really the mask is on the *predictee*. The
-cleanest way to write it is to shift the sequence and mask in the shifted frame:
+Alongside `x`, we have a binary mask `m` of the same length. `m[t] = 1` means
+"position `t` is part of an assistant turn's content", and `m[t] = 0` means
+"position `t` is user text, scaffolding, or padding".
+
+Because GPT-2 predicts the *next* token at each position, it's cleaner to work with
+the shifted version:
 
 ```
-input_ids   = x[:-1]     # positions 0..T-2
-labels      = x[1:]      # positions 1..T-1  (what we predict)
-loss_mask   = m[1:]      # 1 iff labels[t] is an assistant token
+input_ids   = x[:-1]      # positions 0 .. T-2, what we feed in
+labels      = x[1:]       # positions 1 .. T-1, what we try to predict
+loss_mask   = m[1:]       # 1 iff the token we're trying to predict is assistant
 ```
 
-From here on, "position $t$" refers to the shifted frame — so $\text{logits}_t$ predicts
-$y_t = \text{labels}_t$.
+From now on when we say "position `t`" we mean the shifted frame — so the model's
+logits at position `t` predict `labels[t]`, and `loss_mask[t]` tells us whether that
+prediction counts toward the loss.
 
 ### 2.2 Per-token cross-entropy
 
-At position $t$, the model outputs a vector of logits $z_t \in \mathbb{R}^V$. Convert to
-probabilities via softmax:
+At each position `t`, the model outputs a logit vector of length `V` (vocab size).
+Softmax converts logits to a probability distribution over the vocabulary:
 
-$$
-p_{t, v} = \frac{\exp(z_{t, v})}{\sum_{v'} \exp(z_{t, v'})}.
-$$
+    p[t, v] = exp(logit[t, v]) / sum over v' of exp(logit[t, v'])
 
-Cross-entropy with the true token $y_t$:
+The cross-entropy loss at position `t` is the negative log-probability the model
+assigns to the true next token `y_t = labels[t]`:
 
-$$
-\ell_t = -\log p_{t, y_t} = -z_{t, y_t} + \log \sum_{v'} \exp(z_{t, v'}).
-$$
+    ell[t] = -log p[t, y_t]
+           = -logit[t, y_t] + log(sum over v' of exp(logit[t, v']))
 
-The second form (logits minus log-sum-exp) is what you implement for numerical
-stability — never compute the softmax explicitly and then log it.
+The second form is what you actually compute — subtract the correct token's logit
+from the log-sum-exp of all logits. Never compute the softmax first and then take
+its log; that's numerically unstable.
 
 ### 2.3 Masked mean over the batch
 
-Summed over a batch of examples indexed by $(b, t)$:
+Summing across a batch of examples:
 
-$$
-\mathcal{L}_\text{SFT} = \frac{1}{N_\text{resp}} \sum_{b, t} m_{b, t} \cdot \ell_{b, t},
-\qquad N_\text{resp} = \sum_{b, t} m_{b, t}.
-$$
+    L_SFT = sum over (b, t) of { m[b, t] * ell[b, t] }  /  N_resp
 
-$N_\text{resp}$ is the total number of **assistant tokens** in the batch. Divide by that,
-not by $B \cdot T$ — otherwise the loss magnitude depends on how much prompt padding
-you happened to include, which is noise.
+where `N_resp = sum over (b, t) of m[b, t]` is the total number of assistant tokens
+in the batch.
+
+Dividing by `N_resp` (instead of by `B * T` or anything else) means the loss scale
+doesn't depend on how much padding happened to be in the batch. Padding tokens
+contribute zero to the numerator *and* zero to the denominator, so they don't pollute
+either side of the average.
 
 ---
 
 ## 3. Why mask the prompt?
 
-Two reasons.
+Two big reasons.
 
-### 3.1 It's the wrong distribution
+### 3.1 User text is not something we want the model to learn to generate
 
-User prompts are human input; we do not want the model to learn $P(\text{user} \mid \text{history})$.
-If you train on prompt tokens, the model wastes capacity memorizing prompt phrasings
-that, at inference, *we* provide — not the model. At best it's wasted capacity; at
-worst the model starts hallucinating user turns into its own output (the classic
-"Human: ... Assistant:" leakage failure).
+At inference time, **we** write the user's message — the model never has to
+generate user text. If we train on user tokens, the model wastes capacity memorizing
+human prompt phrasings, and worse, sometimes starts hallucinating "Human: ..." turns
+into its own output. This is the classic SFT failure mode where the model keeps
+inventing the other side of the conversation. Masking out user tokens prevents it.
 
-### 3.2 The loss scale is dominated by prompts
+### 3.2 The loss scale is dominated by the prompt
 
-In HH-RLHF, prompts are often longer than responses. If you don't mask, roughly 60–80%
-of the loss comes from prompt tokens and the training signal for the assistant tokens
-is drowned out. You'd see the loss decrease fast but the instruction-following behavior
-would barely improve.
+In HH-RLHF, prompts are often *longer* than responses. Without masking, maybe 60–80%
+of every example's loss is coming from the user's prompt tokens. The assistant's
+response — the part we actually care about — is a small fraction of the signal. You'd
+see training loss drop fast, but qualitatively the model barely gets better at
+responding in the ChatML format.
 
-### 3.3 What the mask includes
+### 3.3 Exactly which tokens the mask includes
 
-Include assistant **content tokens** and the assistant turn's `<|im_end|>`. Exclude:
+Include:
 
-- The `<|im_start|>assistant\n` header tokens (those are scaffolding the model doesn't
-  need to generate — they come from the template).
-- All user content and user's `<|im_start|>user\n` and `<|im_end|>`.
-- Any padding tokens.
+- The **content tokens of each assistant turn**.
+- The assistant turn's closing `<|im_end|>` — we want the model to learn when to
+  stop.
 
-The `<|im_end|>` at the end of an assistant turn **is** masked in — we want the model
-to learn *when to stop*.
+Exclude:
+
+- The `<|im_start|>assistant\n` header. That's scaffolding that comes from our
+  template, not something the model needs to emit.
+- All user tokens: the content, and the user's `<|im_start|>user\n` and `<|im_end|>`.
+- Any padding.
 
 ---
 
-## 4. Gradient of softmax cross-entropy (derive this)
+## 4. Gradient of softmax cross-entropy
 
-You must be able to produce this from a blank page. It's the one gradient every ML
-engineer memorizes, and it's foundational for the PPO surrogate later.
+You must be able to derive this from a blank page. It's the one gradient every ML
+engineer has memorized, and the PPO surrogate we build in Module 4 uses the same
+mechanics.
 
 ### 4.1 Setup
 
-Single position for now. Let $z \in \mathbb{R}^V$, $p = \text{softmax}(z)$, $y$ the
-target class. Loss $\ell = -\log p_y$.
+Fix one position for now. Let `z` be the length-`V` vector of logits and let `p` be
+the softmax of `z`. Let `y` be the index of the correct class. The loss at this
+position is:
+
+    ell = -log p[y]
+
+We want `d ell / d z` — the gradient of the loss with respect to the logits.
 
 ### 4.2 Softmax derivative
 
-For any $v, u$:
+For any two indices `v` and `u`:
 
-$$
-\frac{\partial p_v}{\partial z_u}
-= p_v \left(\delta_{v, u} - p_u\right),
-$$
+    d p[v] / d z[u] = p[v] * (delta(v, u) - p[u])
 
-where $\delta_{v, u} = 1$ if $v = u$ else $0$. Derive this by differentiating
-$p_v = e^{z_v} / \sum_{v'} e^{z_{v'}}$ and grouping.
+where `delta(v, u)` is 1 if `v == u` and 0 otherwise. You get this by differentiating
+`p[v] = exp(z[v]) / sum(exp(z))` and applying the quotient rule — worth doing once
+by hand.
 
-### 4.3 Chain rule for $\ell$
+### 4.3 Chain rule
 
-$$
-\frac{\partial \ell}{\partial z_u}
-= -\frac{1}{p_y} \cdot \frac{\partial p_y}{\partial z_u}
-= -\frac{1}{p_y} \cdot p_y(\delta_{y, u} - p_u)
-= p_u - \delta_{y, u}.
-$$
+    d ell / d z[u]  =  -1/p[y] * d p[y] / d z[u]
+                    =  -1/p[y] * p[y] * (delta(y, u) - p[u])
+                    =  p[u] - delta(y, u)
 
 So in vector form:
 
-$$
-\boxed{\; \frac{\partial \ell}{\partial z} = p - \mathbf{1}_{y} \;}
-$$
+    d ell / d z  =  p - onehot(y)
 
-where $\mathbf{1}_y$ is the one-hot vector at class $y$.
+Read this out loud: **"the gradient is the model's predicted distribution minus a
+delta spike on the correct class."**
 
-Interpretation: the gradient is "predicted distribution minus the delta on the true
-class". It *pushes mass onto the true class and away from everything else* in
-proportion to what the model currently predicts.
+Interpretation: the gradient subtracts probability mass from the true class and adds
+it to every other class, proportional to what the model currently predicts. A
+gradient step (minus this direction) pushes mass *toward* the correct class and *away
+from* every wrong class. Beautifully simple.
 
 ### 4.4 With the mask
 
-Across positions $t$ and with the mask:
+Across positions `t`, with the mask factored in:
 
-$$
-\frac{\partial \mathcal{L}_\text{SFT}}{\partial z_t}
-= \frac{m_t}{N_\text{resp}} \left( p_t - \mathbf{1}_{y_t} \right).
-$$
+    d L_SFT / d z[t]  =  (m[t] / N_resp) * (p[t] - onehot(y[t]))
 
-Three things to notice:
+Three things worth noticing:
 
-- The gradient at position $t$ is **exactly zero** when $m_t = 0$. Flipping the value
-  of a masked label anywhere in the sequence changes nothing — no loss contribution,
-  no gradient. This is what the "flip a masked token" unit test checks.
-- The denominator is $N_\text{resp}$, not $N_\text{resp} \cdot V$. The factor of $V$
-  doesn't appear because $p$ is a distribution (sums to 1), not $V$ independent
-  variables.
-- This gradient is what gets backpropagated through the `lm_head` into the transformer.
+- When `m[t] = 0`, the gradient at that position is exactly zero. Changing the label
+  at a masked-out position doesn't change the loss. This is exactly what the
+  "flip a masked token, loss unchanged" unit test checks.
+- The denominator is `N_resp`, not `N_resp * V`. There's no factor of `V` because
+  `p` is a proper probability distribution (sums to 1) — it's not `V` independent
+  scalars.
+- This is the gradient that flows from the loss into the `lm_head` and then
+  backpropagates through the rest of the transformer.
 
 ---
 
@@ -182,77 +194,99 @@ Three things to notice:
 
 ### 5.1 `sft_loss(logits, labels, loss_mask)` (Problem 2.2)
 
+Shapes:
+
 ```
-logits:    (B, T, V)
+logits:    (B, T, V)     float
 labels:    (B, T)        int64, already shifted
-loss_mask: (B, T)        float or bool
+loss_mask: (B, T)        float or bool (0 or 1)
 ```
 
-Reference implementation (concepts, not code):
+The implementation in three lines:
 
-1. `logp = log_softmax(logits, dim=-1)` — fused, stable.
-2. `nll = -logp.gather(-1, labels.unsqueeze(-1)).squeeze(-1)`  # shape (B, T)
-3. `loss = (nll * loss_mask).sum() / loss_mask.sum().clamp_min(1.0)`
+1. `logp = log_softmax(logits, dim=-1)` — numerically stable, computes log-softmax
+   in one pass.
+2. `nll = -logp.gather(-1, labels.unsqueeze(-1)).squeeze(-1)` — pick the
+   log-probability of the true label at each position. Shape `(B, T)`.
+3. `loss = (nll * loss_mask).sum() / loss_mask.sum().clamp_min(1.0)` — masked mean.
 
-Do **not** use `F.cross_entropy(..., ignore_index=-100)` and stuff `-100` into masked
-labels. The whole point of this course is that you handle the mask explicitly. The
-`ignore_index` trick hides the mask from you and is where subtle bugs live.
+**Do not** use `F.cross_entropy(..., ignore_index=-100)` and stuff `-100` into masked
+labels. The point of this course is that you manage the mask explicitly. The
+`ignore_index` trick hides it from you, which is exactly where subtle bugs live.
 
 ### 5.2 Gradient check (Problem 2.2)
 
 Two tests:
 
-1. **Analytic vs. centered-difference** at fp64 on a tiny tensor (e.g. $B=2, T=4, V=8$).
-   Compute the gradient w.r.t. logits both ways; relative error should be $< 10^{-5}$.
-2. **Mask flip invariance**: construct inputs, compute loss. Now change `labels[b, t]`
-   at any masked-out position to a different token id and recompute. The two losses
-   must be exactly equal. The gradient must also be identical element-wise.
+1. **Analytic vs. finite difference.** Use fp64 and a tiny tensor (say `B=2, T=4,
+   V=8`). Compute the gradient with respect to `logits` both ways: once by calling
+   `.backward()` on the loss, once by perturbing each logit component by `+eps` and
+   `-eps` and averaging. Relative error should be under `1e-5`.
+
+2. **Mask flip invariance.** Construct inputs, compute the loss, then change
+   `labels[b, t]` at any masked-out position to a different token id. The loss
+   must be exactly equal to the original, and the gradient must be elementwise
+   identical.
 
 ### 5.3 DataLoader (Problem 2.3)
 
-- Pad to the longest in the batch, not the block_size. Returning $(B, 1024)$ tensors
-  when the longest example is 300 tokens wastes 70% of compute.
-- Return `input_ids`, `labels`, `loss_mask`, `attention_mask` all at the same shape
-  $(B, T_\text{batch})$.
-- `attention_mask` is the position mask used by the transformer (1 on real tokens, 0
-  on padding). `loss_mask` is the assistant-token mask. They are different tensors and
-  neither implies the other.
+- Pad to the length of the longest example in the batch, not to the full
+  `block_size`. If your batch's longest example is 300 tokens but you pad to 1024,
+  you're wasting 70% of compute on padding.
+- Return four tensors, all with the same shape `(B, T_batch)`:
+  - `input_ids`
+  - `labels` (shifted input_ids)
+  - `loss_mask` (the assistant-token mask, shifted)
+  - `attention_mask` (the usual 1-on-real-tokens, 0-on-padding mask)
+- `attention_mask` and `loss_mask` are different things. `attention_mask` tells the
+  transformer where the real tokens are. `loss_mask` tells the loss which tokens
+  count. Neither implies the other.
 
 ### 5.4 Training loop (Problem 2.4)
 
 The boring-but-important parts:
 
-- AdamW with $\beta = (0.9, 0.95)$, $\text{wd} = 0.1$, **no weight decay on 1D
-  params** (LayerNorm gains/biases and all biases — partition them into a decay
-  group and a no-decay group). This is the karpathy-style param grouping.
-- Cosine LR to 10% of peak over the run, linear warmup of 200 steps from 0 to peak.
-- Gradient clipping at norm 1.0.
-- bf16 autocast for the forward; fp32 master copy and optimizer state.
-- Gradient accumulation: effective batch = `batch_size * accum_steps` — scale loss
-  by `1/accum_steps` before `.backward()` and only step the optimizer every
+- **AdamW** with `betas = (0.9, 0.95)`, `weight_decay = 0.1`, **no weight decay on
+  1D parameters**. In practice this means: LayerNorm scales and biases, plus all
+  biases, go into a "no-decay" group; everything else goes into a "decay" group.
+  This is the param grouping Karpathy used in nanoGPT and InstructGPT follows the
+  same pattern.
+- **Cosine learning rate schedule** from peak LR down to 10% of peak, with a linear
+  warmup of 200 steps from 0 up to peak.
+- **Gradient clipping** at max norm 1.0.
+- **bf16 autocast** for the forward pass, with fp32 master weights and optimizer
+  state.
+- **Gradient accumulation** to hit a larger effective batch. Scale the loss by
+  `1 / accum_steps` before `.backward()`, and only call `opt.step()` every
   `accum_steps` micro-steps.
 
-Run for 2 epochs on HH's `chosen` stream. Log train loss every step, eval loss every
-250 optimizer steps on a held-out split. Save `sft.pt`.
+Run for 2 epochs on HH's `chosen` stream. Log training loss every step, eval loss
+every 250 optimizer steps on a held-out split. Save `sft.pt` at the end.
 
 ### 5.5 What good looks like
 
-- Training loss drops from ~3.5 (base GPT-2 on chat-formatted HH) to ~1.5–2.0 by end
-  of epoch 2. Exact number depends on your tokenization and mask.
-- Qualitative eval (Problem 2.5): base GPT-2 rambles and leaks "Human:"; SFT model
-  produces a coherent single assistant turn that ends with `<|im_end|>`.
+- Training loss typically drops from around 3.5 (base GPT-2 seeing chat-formatted
+  text for the first time) down to roughly 1.5–2.0 by the end of epoch 2. Exact
+  numbers depend on your tokenization and mask — don't obsess over matching
+  someone else's loss.
+- In the qualitative eval (Problem 2.5), the base model will ramble, sometimes
+  invent "Human:" turns, or drift off-topic. The SFT model should produce a single
+  coherent assistant turn that ends cleanly with `<|im_end|>`.
 
-If train loss plateaus above 3.0 after the first few hundred steps, your mask is
-probably wrong (you're training on prompt tokens and the loss is dominated by noise).
+If your training loss plateaus above 3.0 after a few hundred steps, your mask is
+almost certainly wrong — you're either training on prompt tokens or masking out
+assistant tokens you shouldn't be.
 
 ---
 
 ## 6. What to commit to `notes/02-sft.md`
 
-After finishing Module 2, append:
+After finishing Module 2, add:
 
-- Your own re-derivation of the softmax-CE gradient (paper photo or typed).
-- The training/eval loss curves (or a description if no plots).
-- Observations from the qualitative side-by-side in 2.5 — what does base say on your
-  held-out prompts, what does SFT say? Where does SFT still fail? These observations
-  motivate why we need RLHF.
+- Your own re-derivation of the softmax cross-entropy gradient (photo of paper or
+  typed). You must be able to do this cold in a month.
+- Training and eval loss curves, or at least a short description ("loss dropped
+  from 3.6 to 1.8 over two epochs, flattening in the last 500 steps").
+- Observations from the side-by-side in 2.5. What does base GPT-2 say on your
+  held-out prompts? What does SFT say? Where does SFT still fail? Those failure
+  modes are exactly the motivation for RLHF in the next modules.
