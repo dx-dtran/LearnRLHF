@@ -16,7 +16,7 @@ all in `04-*.md`. This note zooms out and talks about:
 
 PPO optimization in this repo uses:
 
-\[
+$$
 \mathcal{L}_{\mathrm{total}}
 \;=\;
 \mathcal{L}_{\mathrm{policy}}
@@ -24,7 +24,7 @@ PPO optimization in this repo uses:
 c_v\,\mathcal{L}_{\mathrm{value}}
 \;-\;
 c_e\,H
-\]
+$$
 
 where `H` is policy entropy. In plain terms: improve actions (`policy`), improve
 critic calibration (`value`), and avoid collapsing too quickly to deterministic

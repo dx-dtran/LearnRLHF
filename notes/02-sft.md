@@ -62,19 +62,19 @@ prediction counts toward the loss.
 At each position `t`, the model outputs a logit vector of length `V` (vocab size).
 Softmax converts logits to a probability distribution over the vocabulary:
 
-\[
+$$
 p_{t,v}=\frac{e^{z_{t,v}}}{\sum_{j=1}^{V} e^{z_{t,j}}}
-\]
+$$
 
 where `z` is just the logits tensor (`z == logits` in code).
 
 The cross-entropy loss at position `t` is the negative log-probability the model
 assigns to the true next token `y_t = labels[t]`:
 
-\[
+$$
 \ell_t=-\log p_{t,y_t}
 =-z_{t,y_t}+\log\!\left(\sum_{j=1}^{V} e^{z_{t,j}}\right)
-\]
+$$
 
 Quick intuition: logits are like raw "scores" for every token, softmax converts
 scores into odds, and cross-entropy measures how surprised we are by the correct
@@ -88,16 +88,16 @@ its log; that's numerically unstable.
 
 Summing across a batch of examples:
 
-\[
+$$
 L_{\text{SFT}}=
 \frac{\sum_{b,t} m_{b,t}\,\ell_{b,t}}
 {\sum_{b,t} m_{b,t}}
 =
 \frac{\sum_{b,t} m_{b,t}\,\ell_{b,t}}
 {N_{\text{resp}}}
-\]
+$$
 
-where \(N_{\text{resp}}=\sum_{b,t} m_{b,t}\) is the total number of assistant tokens
+where $N_{\text{resp}}=\sum_{b,t} m_{b,t}$ is the total number of assistant tokens
 in the batch.
 
 Dividing by `N_resp` (instead of by `B * T` or anything else) means the loss scale
@@ -172,7 +172,7 @@ by hand.
 
 ### 4.3 Chain rule (step-by-step, lighter notation)
 
-\[
+$$
 \frac{\partial \ell}{\partial z_u}
 =
 -\frac{1}{p_y}\frac{\partial p_y}{\partial z_u}
@@ -180,13 +180,13 @@ by hand.
 -\frac{1}{p_y}\,p_y\left(\mathbf{1}[u=y]-p_u\right)
 =
 p_u-\mathbf{1}[u=y]
-\]
+$$
 
 So in vector form:
 
-\[
+$$
 \nabla_z \ell = p-\mathrm{onehot}(y)
-\]
+$$
 
 Read this out loud: **"the gradient is the model's predicted distribution minus a
 delta spike on the correct class."**
@@ -204,11 +204,11 @@ class gets credited.
 
 Across positions `t`, with the mask factored in:
 
-\[
+$$
 \frac{\partial L_{\text{SFT}}}{\partial z_t}
 =
 \frac{m_t}{N_{\text{resp}}}\left(p_t-\mathrm{onehot}(y_t)\right)
-\]
+$$
 
 Three things worth noticing:
 

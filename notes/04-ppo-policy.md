@@ -5,9 +5,9 @@
 Theory packet for Problems 4.5, 4.6, and 4.7. Derive and reason about the three
 terms that make up the PPO loss:
 
-\[
+$$
 L_{\mathrm{PPO}} = L_{\mathrm{policy}} + c_v L_{\mathrm{value}} - c_{\mathrm{entropy}} H
-\]
+$$
 
 By the end you should be able to:
 
@@ -23,9 +23,9 @@ By the end you should be able to:
 
 Recall from `04-ppo-gae.md` that the policy gradient with advantage baseline is:
 
-\[
+$$
 \nabla J(\theta)=\mathbb{E}_{\tau\sim\pi_{\theta}}\!\left[\sum_t \nabla \log \pi_{\theta}(a_t\mid s_t)\,A_t\right]
-\]
+$$
 
 **The problem.** To estimate this gradient, we need trajectories from the *current*
 policy `pi_theta`. But rolling out a batch of trajectories is expensive — each
@@ -38,16 +38,16 @@ expectation is no longer correct for the new policy.
 `pi_old`, frozen at the start of the current outer iteration. We rewrite the
 objective as an expectation under `pi_old` with an importance weight:
 
-\[
+$$
 J(\theta)=\mathbb{E}_{\tau\sim\pi_{\mathrm{old}}}\!\left[\sum_t \rho_t(\theta)\,A_t\right]
-\]
+$$
 
 where the **importance ratio** is:
 
-\[
+$$
 \rho_t(\theta)=\frac{\pi_{\theta}(a_t\mid s_t)}{\pi_{\mathrm{old}}(a_t\mid s_t)}
 =\exp\!\big(\log \pi_{\theta}(a_t\mid s_t)-\log \pi_{\mathrm{old}}(a_t\mid s_t)\big)
-\]
+$$
 
 As long as `pi_theta` stays close to `pi_old`, the gradient of this rewritten
 expression equals the policy gradient.
@@ -65,25 +65,25 @@ the batch while preventing the policy from moving too far per update.
 
 For each token, define two candidate surrogates:
 
-\[
+$$
 \mathrm{surr}_1 = \rho A,\qquad
 \mathrm{surr}_2 = \mathrm{clip}(\rho, 1-\epsilon, 1+\epsilon)A
-\]
+$$
 
 where `clip(x, lo, hi)` pins `x` to the range `[lo, hi]`. `epsilon` is typically
 0.2.
 
 The PPO per-token loss is:
 
-\[
+$$
 L_t^{\mathrm{clip}}=-\min(\mathrm{surr}_1,\mathrm{surr}_2)
-\]
+$$
 
 And the total policy loss:
 
-\[
+$$
 L_{\mathrm{policy}}=\frac{1}{N}\sum_{b,t}\mathrm{mask}_{b,t}\,L_{b,t}^{\mathrm{clip}}
-\]
+$$
 
 where `N` is the count of masked-in response tokens.
 
@@ -124,9 +124,9 @@ For the unclipped case, the per-token loss is `L = -rho * A`. Using
 
 So:
 
-\[
+$$
 \frac{\partial L}{\partial \log \pi_{\theta}} = -A\rho
-\]
+$$
 
 Simple intuition: `A` says whether to increase or decrease the chosen action's
 log-probability, while `\rho` sets how aggressively we do it.
@@ -137,9 +137,9 @@ vanilla policy gradient direction.
 For the clipped case, `surr2 = (a constant with respect to theta) * A`. The
 clip saturates, so changing `log pi_theta` doesn't change `surr2`. Therefore:
 
-\[
+$$
 \frac{\partial L}{\partial \log \pi_{\theta}} = 0
-\]
+$$
 
 That token contributes zero signal to this gradient step.
 
@@ -265,47 +265,47 @@ near zero, generations getting repetitive), bump it to `0.01`.
 
 For one position, the entropy of the per-token distribution `p` over the vocab is:
 
-\[
+$$
 H(p) = -\sum_v p_v \log p_v
-\]
+$$
 
 For a batch of positions:
 
-\[
+$$
 H_{\mathrm{batch}}=\frac{1}{N}\sum_{b,t}\mathrm{mask}_{b,t}\,H(p_{b,t})
-\]
+$$
 
 ### 4.3 Gradient of `H` with respect to logits
 
 Let `z` be the logits and `p = softmax(z)`. Using the softmax derivative
 `d p[v] / d z[u] = p[v] * (delta(v, u) - p[u])` from `02-sft.md`:
 
-\[
+$$
 \frac{\partial H}{\partial z_u}
 =-\sum_v \frac{\partial p_v}{\partial z_u}(\log p_v + 1)
 =-\sum_v p_v\big(\mathbf{1}[v=u]-p_u\big)(\log p_v+1)
-\]
+$$
 
 Expand:
 
-\[
+$$
 =-p_u(\log p_u+1)+p_u\sum_v p_v(\log p_v+1)
-\]
+$$
 
 The sum on the right equals `-H + 1`, since `sum_v p[v] * log p[v] = -H` and
 `sum_v p[v] = 1`. So:
 
-\[
+$$
 \frac{\partial H}{\partial z_u}
 =-p_u(\log p_u+1)+p_u(-H+1)
 =-p_u(\log p_u+H)
-\]
+$$
 
 In vector form:
 
-\[
+$$
 \nabla_z H = -p \odot (\log p + H)
-\]
+$$
 
 where `\odot` means elementwise product.
 

@@ -11,13 +11,13 @@ what you need to produce from it, and how to format everything consistently.
 Even though this module is mostly data plumbing, it helps to formalize the summary
 stats you will compute:
 
-\[
+$$
 \text{len}_{\text{tok}}(x)=\text{number of GPT-2 BPE tokens in string }x
-\]
+$$
 
-\[
+$$
 p_q=\text{$q$-th percentile of }\{\text{len}_{\text{tok}}(x_i)\}_{i=1}^{N}
-\]
+$$
 
 In plain language: `p50` is your "typical length", `p95` is "long but common",
 and `p99` is "rare long tail". Those three numbers tell you where batching and

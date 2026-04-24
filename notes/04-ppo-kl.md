@@ -18,16 +18,16 @@ By the end you should be able to:
 
 The KL target at a state is:
 
-\[
+$$
 \mathrm{KL}(\pi_\theta\Vert\pi_{\mathrm{ref}})
 =\mathbb{E}_{a\sim\pi_\theta}\!\left[\log\pi_\theta(a\mid s)-\log\pi_{\mathrm{ref}}(a\mid s)\right]
-\]
+$$
 
 Single-sample estimator used directly in reward shaping:
 
-\[
+$$
 k_1=\log\pi_\theta(a_t\mid s_t)-\log\pi_{\mathrm{ref}}(a_t\mid s_t)
-\]
+$$
 
 Plain English: if policy and reference agree, KL penalty is near zero; if policy
 pushes probability mass away from reference, the penalty increases and pushes back.

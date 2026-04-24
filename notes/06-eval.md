@@ -15,13 +15,13 @@ Fill this file in with your actual outputs as you run the problems.
 
 Use the tie-aware win rate:
 
-\[
+$$
 \mathrm{win\_rate}_{\mathrm{RLHF}}
 =
 \frac{W_{\mathrm{RLHF}} + 0.5\,T}{N}
-\]
+$$
 
-where \(W_{\mathrm{RLHF}}\) is RLHF wins, \(T\) is ties, and \(N\) is number of
+where $W_{\mathrm{RLHF}}$ is RLHF wins, $T$ is ties, and $N$ is number of
 prompts judged. Think of each tie as "half a win" so the metric stays fair.
 
 ---
