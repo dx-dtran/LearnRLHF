@@ -9,8 +9,8 @@ to:
 2. Derive the gradient of softmax + cross-entropy with respect to the logits by hand.
 3. Explain *exactly* what the `loss_mask` is masking out and why.
 
-SFT is the easiest of the three phases, but the masking logic is the source of the
-bug in the old code in `old/`. Get this right or everything downstream is wrong.
+SFT is the easiest of the three phases, but the masking logic is critical to get right.
+A single off-by-one or inverted mask here will propagate through everything downstream.
 
 ---
 

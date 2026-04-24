@@ -194,7 +194,7 @@ artifact (file, test, or plot) and does not start until the previous one is gree
 ### Module 0 — Setup
 
 **0.1 Clean slate.**
-Move old files to `old/`, rewrite `requirements.txt` (`torch`, `tiktoken`, `datasets`,
+Rewrite `requirements.txt` (`torch`, `tiktoken`, `datasets`,
 `numpy`, `matplotlib`, `tqdm`), create the file layout above with empty modules.
 Artifact: repo structure matches Section 3.
 
@@ -511,7 +511,8 @@ Rules:
   reward, KL (k3), policy loss, value loss, entropy, clip fraction.
 - **Alignment bugs in PPO** (logits[t] vs response[t]): write a 3-token example on paper
   and verify indices before touching code.
-- **`old/`** is an imperfect prior implementation. Diff against it when stuck; don't copy.
+- **If your results don't match expectations**, re-read the gradient derivations in the
+  corresponding `notes/` file and verify every mask and index in the backward pass.
 
 ---
 
