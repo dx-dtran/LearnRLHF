@@ -287,7 +287,7 @@ masks and last-token indices.
 Artifact: dataset shape/dtype test passes.
 
 **3.3 Bradley–Terry loss.**
-`L = -log σ(r_c - r_r)`. Derive ∂L/∂r_c and ∂L/∂r_r in `notes/03-rm.md`, including the
+$L = -\log \sigma(r_c - r_r)$. Derive $\partial L/\partial r_c$ and $\partial L/\partial r_r$ in `notes/03-rm.md`, including the
 softplus form for numerical stability. Gradient-check at fp64.
 Artifact: test_grad_rm.py passes.
 
