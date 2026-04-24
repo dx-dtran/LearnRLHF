@@ -33,10 +33,17 @@ Our "environment" is one episode of assistant generation. Given a prompt `s_0`
 
 The objective is the expected total reward over a sampled trajectory:
 
+$$
+J(\theta) \;=\; \mathbb{E}_{\tau \sim \pi_\theta}\!\left[\, \sum_t \gamma^t \, r_t \,\right]
+$$
+
+Or in code-style:
+
     J(theta) = E_{tau ~ pi_theta} [ sum_t gamma^t * r_t ]
 
-`gamma` is a discount factor in `[0, 1]`. For text RL we use `gamma = 1` — episodes
-are short, and we want credit assignment to flow across the entire response.
+$\gamma$ is a discount factor in $[0, 1]$. For text RL we use $\gamma = 1$ — episodes
+are short, and we want credit assignment to flow across the entire response without
+the exponential dampening that $\gamma < 1$ would give.
 
 ---
 
@@ -44,14 +51,27 @@ are short, and we want credit assignment to flow across the entire response.
 
 ### 2.1 What it says
 
-The gradient of the expected return, with respect to the policy parameters `theta`,
+The gradient of the expected return, with respect to the policy parameters $\theta$,
 can be written as:
+
+$$
+\nabla_\theta J \;=\; \mathbb{E}_{\tau \sim \pi_\theta}\!\left[\, \sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t) \cdot \hat G_t \,\right]
+$$
+
+Or in code-style:
 
     grad J = E_{tau ~ pi_theta} [ sum_t grad log pi_theta(a_t | s_t) * G_hat_t ]
 
-where `G_hat_t` is any unbiased estimate of "the return from time `t` onward",
-meaning `E[ sum over k >= t of gamma^{k-t} * r_k ]`. The simplest choice is the
-Monte Carlo return — just the actual cumulative reward we observed from time `t`:
+where $\hat G_t$ is any unbiased estimate of "the return from time $t$ onward",
+i.e. any random variable whose expectation equals
+$\mathbb{E}\bigl[\sum_{k \ge t} \gamma^{k-t} r_k\bigr]$. The simplest choice is the
+Monte Carlo return — just the actual cumulative reward we observed from time $t$:
+
+$$
+\hat G_t \;=\; \sum_{k=t}^{T-1} \gamma^{k-t} \, r_k
+$$
+
+Or in code-style:
 
     G_hat_t = sum over k = t..T-1 of gamma^{k-t} * r_k
 
@@ -59,18 +79,58 @@ Monte Carlo return — just the actual cumulative reward we observed from time `
 
 Do the full derivation on paper at least once. Sketch:
 
-- `J(theta) = sum over trajectories tau of p_theta(tau) * R(tau)`, where `R(tau)`
-  is the total return of the trajectory.
-- Factor the trajectory probability:
-  `p_theta(tau) = P(s_0) * product_t pi_theta(a_t | s_t) * P(s_{t+1} | s_t, a_t)`.
-  Only the policy factors depend on `theta`.
-- Take `log` and then `grad`: `grad log p_theta(tau) = sum_t grad log pi_theta(a_t | s_t)`.
-  The transition probabilities and initial state drop out because they don't depend
-  on `theta`.
-- Use the log-derivative trick: `grad J = E[ grad log p_theta(tau) * R(tau) ]`.
-- Apply causality: action `a_t` can only affect rewards from time `t` onward. So
-  inside the sum over `t`, we can replace the total return `R(tau)` with just the
-  return-to-go `G_hat_t` without changing the expectation.
+**Step 1.** Write the objective as a sum (or integral) over trajectories:
+
+$$
+J(\theta) \;=\; \sum_\tau p_\theta(\tau) \cdot R(\tau)
+$$
+
+where $R(\tau) = \sum_t \gamma^t r_t$ is the total return of the trajectory.
+
+**Step 2.** Factor the trajectory probability:
+
+$$
+p_\theta(\tau) \;=\; P(s_0) \,\prod_t \pi_\theta(a_t \mid s_t) \cdot P(s_{t+1} \mid s_t, a_t)
+$$
+
+Only the policy factors depend on $\theta$. The initial state distribution and the
+transition dynamics are "the environment" and we don't control them.
+
+**Step 3.** The **log-derivative trick**. For any function $f(\theta)$:
+
+$$
+\nabla_\theta f \;=\; f \cdot \nabla_\theta \log f
+$$
+
+(just rearrange $\nabla \log f = \nabla f / f$). Apply this to $p_\theta(\tau)$:
+
+$$
+\nabla_\theta p_\theta(\tau) \;=\; p_\theta(\tau) \cdot \nabla_\theta \log p_\theta(\tau)
+$$
+
+**Step 4.** Take the gradient of $J$ and push it inside the sum:
+
+$$
+\nabla_\theta J \;=\; \sum_\tau \nabla_\theta p_\theta(\tau) \cdot R(\tau)
+\;=\; \sum_\tau p_\theta(\tau) \cdot \nabla_\theta \log p_\theta(\tau) \cdot R(\tau)
+\;=\; \mathbb{E}_\tau \!\left[\, \nabla_\theta \log p_\theta(\tau) \cdot R(\tau) \,\right]
+$$
+
+**Step 5.** Take $\log$ of the factored $p_\theta(\tau)$ and then the gradient:
+
+$$
+\nabla_\theta \log p_\theta(\tau) \;=\; \sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t)
+$$
+
+The $P(s_0)$ and transition terms drop out because they don't depend on $\theta$.
+
+**Step 6.** Apply causality. Action $a_t$ can only affect rewards from time $t$
+onward — the past is the past. That lets us replace $R(\tau)$ inside the sum with
+just the return-to-go $\hat G_t$ without changing the expectation. Done.
+
+Intuition for the end result: at each step, we nudge the model to make the action
+it took more (or less) likely, weighted by how good the future turned out to be.
+"Take what worked, do more of it" — gradient descent on trial and error.
 
 ### 2.3 What this means intuitively
 
@@ -91,35 +151,61 @@ without introducing bias is the whole game from here on.
 
 ## 3. Baselines and advantages
 
-Here's a nice fact. For any function `b(s_t)` that depends only on the state (not
+Here's a nice fact. For any function $b(s_t)$ that depends only on the state (not
 on the action we took):
 
-    E_{a ~ pi} [ grad log pi(a | s_t) * b(s_t) ]  =  0
+$$
+\mathbb{E}_{a \sim \pi}\!\left[\, \nabla_\theta \log \pi(a \mid s_t) \cdot b(s_t) \,\right] \;=\; 0
+$$
 
-Why? Because `b(s_t)` doesn't depend on `a`, so it pulls out of the expectation
-over `a`. What's left is `E_a[ grad log pi(a | s_t) ]`, which equals
-`grad E_a[ 1 ] = grad 1 = 0`.
+Why? Because $b(s_t)$ doesn't depend on $a$, it pulls out of the expectation over
+$a$. What's left is $\mathbb{E}_a[\nabla \log \pi(a \mid s_t)]$, which is zero.
+Here's the one-line proof of that inner identity:
 
-So we can *subtract* any state-dependent `b(s_t)` from our return estimate
+$$
+\mathbb{E}_a \bigl[\nabla \log \pi(a \mid s)\bigr]
+\;=\; \sum_a \pi(a \mid s) \cdot \frac{\nabla \pi(a \mid s)}{\pi(a \mid s)}
+\;=\; \sum_a \nabla \pi(a \mid s)
+\;=\; \nabla \sum_a \pi(a \mid s)
+\;=\; \nabla 1 \;=\; 0
+$$
+
+So we can **subtract** any state-dependent $b(s_t)$ from our return estimate
 without changing the expected gradient:
 
-    grad J  =  E[ sum_t grad log pi(a_t | s_t) * (G_hat_t - b(s_t)) ]
+$$
+\nabla_\theta J \;=\; \mathbb{E}\!\left[\, \sum_t \nabla_\theta \log \pi(a_t \mid s_t) \cdot \bigl(\hat G_t - b(s_t)\bigr) \,\right]
+$$
 
-This is unbiased for any choice of `b(s_t)`. But a good choice of `b` can slash
-the variance of the estimator. The best choice is `b(s_t) = E[G_t | s_t]` — the
-expected return starting from state `s_t` — because subtracting it leaves behind
-only the *action-specific* deviation from the average.
+Or in code-style:
 
-We learn such a `b` with a neural network and call it the **value function**
-`V(s_t)`. The difference between the observed return and the expected return is
+    grad J = E[ sum_t grad log pi(a_t | s_t) * (G_hat_t - b(s_t)) ]
+
+This is unbiased for any choice of $b(s_t)$. But a **good** choice of $b$ can slash
+the variance of the estimator. The best choice is $b(s_t) = \mathbb{E}[\hat G_t \mid s_t]$
+— the expected return starting from state $s_t$ — because subtracting it leaves
+behind only the *action-specific* deviation from the average.
+
+We learn such a $b$ with a neural network and call it the **value function**
+$V(s_t)$. The difference between the observed return and the expected return is
 called the **advantage**:
 
-    A_t = G_hat_t - V(s_t)
+$$
+A_t \;=\; \hat G_t \,-\, V(s_t)
+$$
 
 Read "advantage" literally: how much better (or worse) did this action turn out than
-what we expected before taking it?
+what we expected before taking it? An analogy: a golfer's handicap gives you the
+expected score. Your actual score minus your handicap is your "advantage" for that
+round — it tells you whether you played above or below expectation.
 
 The variance-reduced policy gradient:
+
+$$
+\nabla_\theta J \;=\; \mathbb{E}\!\left[\, \sum_t \nabla_\theta \log \pi(a_t \mid s_t) \cdot A_t \,\right]
+$$
+
+Or in code-style:
 
     grad J = E[ sum_t grad log pi(a_t | s_t) * A_t ]
 
@@ -132,11 +218,17 @@ gradient algorithm uses.
 
 Before we define GAE, one more building block: the **one-step TD error**.
 
-    delta_t  =  r_t + gamma * V(s_{t+1}) - V(s_t)
+$$
+\delta_t \;=\; r_t \,+\, \gamma \, V(s_{t+1}) \,-\, V(s_t)
+$$
+
+Or in code-style:
+
+    delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
 
 Read this as: "the reward I actually got, plus what the value function says is left
 to earn from the next state, minus what I had expected from this state". It's the
-part of the return at time `t` that wasn't predicted by the value function. (TD
+part of the return at time $t$ that wasn't predicted by the value function. (TD
 stands for "temporal difference".)
 
 We can build advantage estimators out of TD errors, and we can pick how many of
@@ -146,7 +238,13 @@ them to use:
 
 Use one TD error:
 
-    A_t^(0) = delta_t
+$$
+A_t^{(1)} \;=\; \delta_t
+$$
+
+Or in code-style:
+
+    A_t^(1) = delta_t
 
 - **Low variance**: depends on only one reward sample.
 - **High bias**: relies heavily on `V(s_{t+1})` being accurate. If `V` is wrong, so
@@ -156,6 +254,12 @@ Use one TD error:
 
 Sum rewards all the way to the episode end:
 
+$$
+A_t^{(\infty)} \;=\; \sum_{k=t}^{T-1} \gamma^{k-t} \, r_k \;-\; V(s_t)
+$$
+
+Or in code-style:
+
     A_t^(infinity) = sum over k = t..T-1 of gamma^{k-t} * r_k  -  V(s_t)
 
 - **Zero bias**: doesn't trust `V` at all except as the baseline at time `t`.
@@ -163,13 +267,27 @@ Sum rewards all the way to the episode end:
 
 ### 4.3 n-step in between
 
-You can also use `n` real rewards and then bootstrap:
+You can also use $n$ real rewards and then bootstrap with $V$:
 
-    A_t^(n) = r_t + gamma * r_{t+1} + ... + gamma^{n-1} * r_{t+n-1} + gamma^n * V(s_{t+n}) - V(s_t)
+$$
+A_t^{(n)}
+\;=\; r_t + \gamma\, r_{t+1} + \cdots + \gamma^{n-1}\, r_{t+n-1} + \gamma^n V(s_{t+n}) \,-\, V(s_t)
+$$
+
+An equivalent form in terms of TD errors:
+
+$$
+A_t^{(n)} \;=\; \sum_{k=0}^{n-1} \gamma^k \, \delta_{t+k}
+$$
+
+Or in code-style:
+
+    A_t^(n) = r_t + gamma*r_{t+1} + ... + gamma^{n-1}*r_{t+n-1} + gamma^n*V(s_{t+n}) - V(s_t)
             = sum over k = 0..n-1 of gamma^k * delta_{t+k}
 
 (The second line is a nice algebraic identity — check it by expanding the definition
-of `delta`. The intermediate `V` terms telescope.)
+of $\delta$. The intermediate $V$ terms telescope: the $+\gamma V(s_{t+1})$ from
+$\delta_t$ cancels the $-V(s_{t+1})$ from $\delta_{t+1}$, and so on.)
 
 As `n` grows, bias falls and variance rises. GAE gives us a single knob that slides
 smoothly between these choices.
@@ -180,12 +298,18 @@ smoothly between these choices.
 
 ### 5.1 Definition
 
-GAE is an exponentially weighted average of the n-step advantages for all `n >= 1`.
+GAE is an exponentially weighted average of the n-step advantages for all $n \ge 1$.
 In terms of TD errors:
 
-    A_t^GAE  =  sum over k = 0, 1, 2, ... of (gamma * lambda)^k * delta_{t+k}
+$$
+A_t^{\mathrm{GAE}} \;=\; \sum_{k=0}^{\infty} (\gamma \lambda)^k \, \delta_{t+k}
+$$
 
-The knob is `lambda` in `[0, 1]`:
+Or in code-style:
+
+    A_t^GAE = sum over k = 0, 1, 2, ... of (gamma * lambda)^k * delta_{t+k}
+
+The knob is $\lambda$ in $[0, 1]$:
 
 - `lambda = 0`: GAE collapses to one-step TD, `A_t = delta_t`. Low variance, high
   bias.
@@ -195,18 +319,30 @@ The knob is `lambda` in `[0, 1]`:
 
 ### 5.2 Deriving the recursion
 
-This is the clever trick. Split off the first term of the sum:
+This is the clever trick. Split off the first term of the sum, then factor out one
+$(\gamma \lambda)$ from the rest:
+
+$$
+A_t^{\mathrm{GAE}}
+\;=\; \delta_t \,+\, \sum_{k=1}^{\infty} (\gamma\lambda)^k \, \delta_{t+k}
+\;=\; \delta_t \,+\, (\gamma\lambda) \sum_{k=0}^{\infty} (\gamma\lambda)^k \, \delta_{t+1+k}
+\;=\; \delta_t \,+\, (\gamma\lambda) \, A_{t+1}^{\mathrm{GAE}}
+$$
+
+Or in code-style:
 
     A_t = delta_t + sum over k = 1, 2, ... of (gamma*lambda)^k * delta_{t+k}
         = delta_t + (gamma*lambda) * sum over k = 0, 1, ... of (gamma*lambda)^k * delta_{t+1+k}
         = delta_t + (gamma*lambda) * A_{t+1}
 
-So the GAE advantage satisfies:
+So the GAE advantage satisfies the one-line recursion:
 
-    A_t = delta_t + gamma * lambda * A_{t+1}
+$$
+A_t \;=\; \delta_t \,+\, \gamma\lambda \, A_{t+1}
+$$
 
-Boundary condition: at the terminal time `T`, the episode is over, so `V(s_T) = 0`
-by convention and `A_T = 0`.
+Boundary condition: at the terminal time $T$, the episode is over, so $V(s_T) = 0$
+by convention and $A_T = 0$.
 
 This recursion runs *backwards* through time, from `T-1` down to `0`, and that's
 how we compute it in code.
@@ -229,6 +365,12 @@ zeroed out.
 ### 5.4 Returns as value targets
 
 After computing advantages, the value head needs a regression target. We use:
+
+$$
+R_t \;=\; A_t \,+\, V_t
+$$
+
+Or in code-style:
 
     R_t = A_t + V_t
 
@@ -269,7 +411,13 @@ position.
 In classical RL, the environment hands you a reward at every step. For text we
 have to *construct* the per-token reward ourselves:
 
-    r_t  =  - beta * KL_t(pi_theta || pi_ref)     +     r_RM(y) * (t == last_response_token)
+$$
+r_t \;=\; -\beta \cdot \mathrm{KL}_t(\pi_\theta \,\|\, \pi_{\mathrm{ref}}) \;+\; r_{\mathrm{RM}}(y) \cdot \mathbf{1}[\,t = T_{\mathrm{last}}\,]
+$$
+
+Or in code-style:
+
+    r_t = -beta * KL_t(pi_theta || pi_ref)  +  r_RM(y) * (t == last_response_token)
 
 Two pieces:
 
@@ -299,6 +447,16 @@ Two consequences worth understanding:
 
 Before feeding advantages into the PPO policy loss, normalize them across valid
 tokens so they have mean 0 and std 1:
+
+$$
+\mu \;=\; \frac{\sum_{b,t} m_{b,t}\, A_{b,t}}{\sum_{b,t} m_{b,t}},
+\qquad
+\sigma^2 \;=\; \frac{\sum_{b,t} m_{b,t}\, (A_{b,t} - \mu)^2}{\sum_{b,t} m_{b,t}},
+\qquad
+\tilde A \;=\; \frac{A - \mu}{\sqrt{\sigma^2} + \varepsilon}
+$$
+
+Or in code-style:
 
     mean = (sum over (b, t) of mask[b, t] * A[b, t])  /  sum(mask)
     var  = (sum over (b, t) of mask[b, t] * (A[b, t] - mean)^2)  /  sum(mask)

@@ -59,29 +59,61 @@ prediction counts toward the loss.
 
 ### 2.2 Per-token cross-entropy
 
-At each position `t`, the model outputs a logit vector of length `V` (vocab size).
-Softmax converts logits to a probability distribution over the vocabulary:
+At each position `t`, the model outputs a logit vector $z_t$ of length `V` (vocab
+size). Softmax converts logits to a probability distribution over the vocabulary:
 
-    p[t, v] = exp(logit[t, v]) / sum over v' of exp(logit[t, v'])
+$$
+p_{t,v} \;=\; \frac{\exp(z_{t,v})}{\sum_{v'} \exp(z_{t,v'})}
+$$
+
+Or in code-style:
+
+    p[t, v] = exp(z[t, v]) / sum over v' of exp(z[t, v'])
+
+Intuition: the logits are unconstrained real numbers; softmax is the function that
+turns an arbitrary vector of real numbers into a legal probability distribution (all
+entries non-negative and summing to 1). The exponential makes things positive; the
+division by the sum normalizes them. Same recipe you'd use to turn any list of
+"scores" into a distribution.
 
 The cross-entropy loss at position `t` is the negative log-probability the model
-assigns to the true next token `y_t = labels[t]`:
+assigns to the true next token $y_t = \text{labels}[t]$:
+
+$$
+\ell_t \;=\; -\log p_{t,y_t} \;=\; -z_{t,y_t} \;+\; \log \sum_{v'} \exp(z_{t,v'})
+$$
+
+Or in code-style:
 
     ell[t] = -log p[t, y_t]
-           = -logit[t, y_t] + log(sum over v' of exp(logit[t, v']))
+           = -z[t, y_t] + log(sum over v' of exp(z[t, v']))
 
-The second form is what you actually compute — subtract the correct token's logit
-from the log-sum-exp of all logits. Never compute the softmax first and then take
-its log; that's numerically unstable.
+The second form — "correct-class logit, minus the log-sum-exp of all logits" — is
+what you actually compute. Never compute the softmax first and then take its log;
+the softmax can underflow to zero and `log(0)` blows up. The `log_softmax` op in
+PyTorch uses the log-sum-exp trick internally to stay numerically stable.
+
+Intuition for the loss: `-log p` is tiny (close to 0) when the model is confident and
+correct, and huge (goes to infinity) when the model is confident and wrong. It's a
+surprise. We're training the model to minimize surprise on the assistant tokens we
+want it to produce.
 
 ### 2.3 Masked mean over the batch
 
-Summing across a batch of examples:
+Summing across a batch of examples, indexed by `(b, t)`:
 
-    L_SFT = sum over (b, t) of { m[b, t] * ell[b, t] }  /  N_resp
+$$
+L_{\mathrm{SFT}} \;=\; \frac{1}{N_{\mathrm{resp}}} \sum_{b, t} m_{b,t} \cdot \ell_{b,t},
+\qquad
+N_{\mathrm{resp}} \;=\; \sum_{b, t} m_{b,t}
+$$
 
-where `N_resp = sum over (b, t) of m[b, t]` is the total number of assistant tokens
-in the batch.
+Or in code-style:
+
+    L_SFT  =  sum over (b, t) of { m[b, t] * ell[b, t] }  /  N_resp
+    N_resp =  sum over (b, t) of m[b, t]
+
+$N_{\mathrm{resp}}$ is the total number of assistant tokens in the batch.
 
 Dividing by `N_resp` (instead of by `B * T` or anything else) means the loss scale
 doesn't depend on how much padding happened to be in the batch. Padding tokens
@@ -135,45 +167,120 @@ mechanics.
 
 ### 4.1 Setup
 
-Fix one position for now. Let `z` be the length-`V` vector of logits and let `p` be
-the softmax of `z`. Let `y` be the index of the correct class. The loss at this
+Fix one position for now. Let $z$ be the length-$V$ vector of logits and let $p$ be
+the softmax of $z$. Let $y$ be the index of the correct class. The loss at this
 position is:
 
-    ell = -log p[y]
+$$
+\ell \;=\; -\log p_y
+$$
 
-We want `d ell / d z` — the gradient of the loss with respect to the logits.
+We want $\partial \ell / \partial z$ — the gradient of the loss with respect to the
+logits. Our plan is the usual one: compute it by the chain rule, breaking the
+derivative into two pieces — how the loss changes with the probability, and how the
+probability changes with the logit.
 
 ### 4.2 Softmax derivative
 
-For any two indices `v` and `u`:
+For any two indices $v$ and $u$ we have:
+
+$$
+\frac{\partial p_v}{\partial z_u} \;=\; p_v \cdot (\delta_{v,u} \,-\, p_u)
+$$
+
+where $\delta_{v,u}$ is the Kronecker delta (reads: "1 if the subscripts are equal,
+0 otherwise"). In code-style:
 
     d p[v] / d z[u] = p[v] * (delta(v, u) - p[u])
 
-where `delta(v, u)` is 1 if `v == u` and 0 otherwise. You get this by differentiating
-`p[v] = exp(z[v]) / sum(exp(z))` and applying the quotient rule — worth doing once
-by hand.
+Derive this once yourself. Start from $p_v = \exp(z_v) / S$ where
+$S = \sum_{v'} \exp(z_{v'})$, and use the quotient rule:
+
+$$
+\frac{\partial p_v}{\partial z_u}
+\;=\; \frac{(\partial \exp(z_v)/\partial z_u) \cdot S \,-\, \exp(z_v) \cdot (\partial S/\partial z_u)}{S^2}
+$$
+
+The first derivative in the numerator is $\exp(z_v) \cdot \delta_{v,u}$ (since
+$\exp(z_v)$ depends on $z_u$ only when $v = u$). The second is
+$\partial S/\partial z_u = \exp(z_u)$. Plug in and collect terms:
+
+$$
+\frac{\partial p_v}{\partial z_u}
+\;=\; \frac{\exp(z_v)}{S} \delta_{v,u} \;-\; \frac{\exp(z_v)}{S} \cdot \frac{\exp(z_u)}{S}
+\;=\; p_v \delta_{v,u} \;-\; p_v p_u
+\;=\; p_v (\delta_{v,u} - p_u)
+$$
+
+Done. This result is worth memorizing — it shows up every time you differentiate a
+softmax.
 
 ### 4.3 Chain rule
 
-    d ell / d z[u]  =  -1/p[y] * d p[y] / d z[u]
-                    =  -1/p[y] * p[y] * (delta(y, u) - p[u])
-                    =  p[u] - delta(y, u)
+Now stitch together "how does $\ell$ depend on $p_y$" with "how does $p_y$ depend on
+$z_u$":
 
-So in vector form:
+$$
+\frac{\partial \ell}{\partial z_u}
+\;=\; \frac{\partial \ell}{\partial p_y} \cdot \frac{\partial p_y}{\partial z_u}
+$$
+
+The first factor comes from $\ell = -\log p_y$:
+
+$$
+\frac{\partial \ell}{\partial p_y} \;=\; -\frac{1}{p_y}
+$$
+
+The second factor we just computed (plug $v = y$):
+
+$$
+\frac{\partial p_y}{\partial z_u} \;=\; p_y (\delta_{y,u} - p_u)
+$$
+
+Multiply them:
+
+$$
+\frac{\partial \ell}{\partial z_u}
+\;=\; -\frac{1}{p_y} \cdot p_y (\delta_{y,u} - p_u)
+\;=\; -(\delta_{y,u} - p_u)
+\;=\; p_u - \delta_{y,u}
+$$
+
+The $p_y$ cancels beautifully. In vector form:
+
+$$
+\frac{\partial \ell}{\partial z} \;=\; p \,-\, e_y
+$$
+
+where $e_y$ is the one-hot vector with a 1 at index $y$ and 0 elsewhere. Or in
+code-style:
 
     d ell / d z  =  p - onehot(y)
 
 Read this out loud: **"the gradient is the model's predicted distribution minus a
-delta spike on the correct class."**
+spike on the correct class."**
 
 Interpretation: the gradient subtracts probability mass from the true class and adds
 it to every other class, proportional to what the model currently predicts. A
-gradient step (minus this direction) pushes mass *toward* the correct class and *away
-from* every wrong class. Beautifully simple.
+gradient *step* (minus this direction) pushes mass *toward* the correct class and
+*away from* every wrong class. Every update is a small rebalancing.
+
+An analogy that helps: imagine each class as a bucket, and $p$ as how full each
+bucket is with water. The true bucket is $y$. The gradient says "drain a little
+water from every bucket in proportion to how full it is, then dump an equal total
+amount into bucket $y$." After many steps, bucket $y$ is full and everything else
+is nearly empty — which is exactly what confident, correct prediction looks like.
 
 ### 4.4 With the mask
 
 Across positions `t`, with the mask factored in:
+
+$$
+\frac{\partial L_{\mathrm{SFT}}}{\partial z_t}
+\;=\; \frac{m_t}{N_{\mathrm{resp}}} \cdot (p_t - e_{y_t})
+$$
+
+Or in code-style:
 
     d L_SFT / d z[t]  =  (m[t] / N_resp) * (p[t] - onehot(y[t]))
 
