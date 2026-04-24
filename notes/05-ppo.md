@@ -12,6 +12,24 @@ all in `04-*.md`. This note zooms out and talks about:
 4. How to make the code work for all four GPT-2 sizes, even if the larger ones
    OOM.
 
+### Quick objective recap in one place
+
+PPO optimization in this repo uses:
+
+\[
+\mathcal{L}_{\mathrm{total}}
+\;=\;
+\mathcal{L}_{\mathrm{policy}}
+\;+\;
+c_v\,\mathcal{L}_{\mathrm{value}}
+\;-\;
+c_e\,H
+\]
+
+where `H` is policy entropy. In plain terms: improve actions (`policy`), improve
+critic calibration (`value`), and avoid collapsing too quickly to deterministic
+token choices (`entropy`).
+
 ---
 
 ## 1. The four models

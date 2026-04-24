@@ -11,6 +11,19 @@ at this stage — the theory is all behind you. This note is about:
 
 Fill this file in with your actual outputs as you run the problems.
 
+### Quick metric formula (with tie handling)
+
+Use the tie-aware win rate:
+
+\[
+\mathrm{win\_rate}_{\mathrm{RLHF}}
+=
+\frac{W_{\mathrm{RLHF}} + 0.5\,T}{N}
+\]
+
+where \(W_{\mathrm{RLHF}}\) is RLHF wins, \(T\) is ties, and \(N\) is number of
+prompts judged. Think of each tie as "half a win" so the metric stays fair.
+
 ---
 
 ## 1. Generation comparison (Problem 6.1)

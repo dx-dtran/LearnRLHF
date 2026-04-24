@@ -111,12 +111,12 @@ note before implementing the loss, and re-derive each gradient on paper as you g
 **1. Causal LM / SFT.**
 
 $$
-\mathcal{L} = -\frac{1}{N_\text{resp}} \sum_t m_t \, \log \mathrm{softmax}(W h_t)_{y_t}
+\mathcal{L} = -\frac{1}{N_{\mathrm{resp}}} \sum_t m_t \, \log \mathrm{softmax}(W h_t)_{y_t}
 $$
 
 $$
 \frac{\partial \mathcal{L}}{\partial \mathrm{logits}_t}
-= \frac{m_t}{N_\text{resp}} \left( \mathrm{softmax}(\mathrm{logits}_t) - \mathbf{1}_{y_t} \right)
+= \frac{m_t}{N_{\mathrm{resp}}} \left( \mathrm{softmax}(\mathrm{logits}_t) - \mathbf{1}_{y_t} \right)
 $$
 
 **2. Reward model (Bradley–Terry).**
@@ -136,7 +136,7 @@ Note the symmetry: the gradients sum to zero.
 **3. PPO clipped surrogate.**
 
 $$
-\rho_t = \exp(\log \pi_t - \log \pi_t^\text{old})
+\rho_t = \exp(\log \pi_t - \log \pi_t^{\mathrm{old}})
 $$
 
 $$
@@ -152,12 +152,12 @@ with $\mathrm{sign}(A_t)$.
 **4. KL penalty (per-token).**
 
 $$
-\mathrm{KL}_t \approx \log \pi_t - \log \pi_t^\text{ref}
-\qquad (k_1 \text{ estimator, unbiased, high variance})
+\mathrm{KL}_t \approx \log \pi_t - \log \pi_t^{\mathrm{ref}}
+\qquad (k_1 \;\mathrm{estimator,\ unbiased,\ high\ variance})
 $$
 
-Token reward: $r_t = r_\text{RM} \cdot \mathbf{1}_{t=T} - \beta \cdot \mathrm{KL}_t$.
-Since $\pi^\text{ref}$ is frozen: $\partial \mathrm{KL}_t / \partial \log \pi_t = 1$.
+Token reward: $r_t = r_{\mathrm{RM}} \cdot \mathbf{1}_{t=T} - \beta \cdot \mathrm{KL}_t$.
+Since $\pi^{\mathrm{ref}}$ is frozen: $\partial \mathrm{KL}_t / \partial \log \pi_t = 1$.
 
 The $k_3$ estimator $(\rho - 1) - \log \rho$ is nonnegative and lower-variance, preferred
 for logging but nonlinear in $\rho$ as a penalty.
@@ -166,7 +166,7 @@ for logging but nonlinear in $\rho$ as a penalty.
 
 $$
 \mathcal{L}_V = \tfrac{1}{2}(V_t - R_t)^2
-\qquad \text{(or clipped variant; see notes/04-ppo-policy.md)}
+\qquad \mathrm{(or\ clipped\ variant;\ see\ notes/04\text{-}ppo\text{-}policy.md)}
 $$
 
 $R_t$ is a stop-gradient constant even though it was computed from $V$ via GAE.
@@ -319,8 +319,8 @@ Explain the variance tradeoff in `notes/04-ppo-kl.md`.
 Artifact: unit test that k1 integrates to expected KL on a known distribution.
 
 **4.3 Reward shaping.**
-Terminal reward $r_\text{RM}$ from RM at `<|im_end|>`; per-token reward
-$r_t = -\beta \cdot \mathrm{KL}_t + r_\text{RM} \cdot \mathbf{1}_{t=T}$.
+Terminal reward $r_{\mathrm{RM}}$ from RM at `<|im_end|>`; per-token reward
+$r_t = -\beta \cdot \mathrm{KL}_t + r_{\mathrm{RM}} \cdot \mathbf{1}_{t=T}$.
 Test: $\beta \to 0$ collapses to pure RM terminal reward.
 Artifact: unit test passes.
 
@@ -345,7 +345,7 @@ Artifact: test_grad_ppo.py::test_ppo_policy_loss_grad passes.
 **4.6 Value loss (clipped).**
 
 $$
-\mathcal{L}_V = \tfrac{1}{2} \, \max\!\left( (V - R)^2, \; (\mathrm{clip}(V, V_\text{old} - \varepsilon_v, V_\text{old} + \varepsilon_v) - R)^2 \right) \cdot \mathrm{mask}
+\mathcal{L}_V = \tfrac{1}{2} \, \max\!\left( (V - R)^2, \; (\mathrm{clip}(V, V_{\mathrm{old}} - \varepsilon_v, V_{\mathrm{old}} + \varepsilon_v) - R)^2 \right) \cdot \mathrm{mask}
 $$
 
 Gradient-check. Explain why clipping value helps early training in `notes/04-ppo-policy.md`.
@@ -378,7 +378,7 @@ Artifact: one rollout iteration runs without error.
 
 **5.3 Inner loop (optimize phase).**
 For $K = 4$ epochs, iterate minibatches, compute
-$\mathcal{L} = \mathcal{L}_\pi + c_v \mathcal{L}_V - c_\text{ent} H$, backward, clip
+$\mathcal{L} = \mathcal{L}_\pi + c_v \mathcal{L}_V - c_{\mathrm{ent}} H$, backward, clip
 grad norm to 1.0, step. Recompute $\log \pi$ and $V$ freshly each minibatch;
 $\log \pi^\text{old}$ is frozen from rollout.
 Artifact: one full inner loop runs without error.

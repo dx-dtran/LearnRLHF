@@ -14,6 +14,23 @@ covers:
 Related notes: `04-ppo-kl.md` (the KL penalty) and `04-ppo-policy.md` (the PPO
 clipped surrogate, value loss, entropy). Read those after this one.
 
+### Quick chain-rule roadmap (lighter notation)
+
+Core objective:
+
+\[
+J(\theta)=\mathbb{E}_{\tau\sim\pi_\theta}\left[\sum_t \gamma^t r_t\right]
+\]
+
+Policy-gradient identity you keep reusing:
+
+\[
+\nabla_\theta J(\theta)=\mathbb{E}\left[\sum_t \nabla_\theta \log\pi_\theta(a_t\mid s_t)\,\hat A_t\right]
+\]
+
+Analogy: `\hat A_t` is a per-token "after-action report." Positive report means
+"do this kind of token more often in this context"; negative means "less often."
+
 ---
 
 ## 1. Notation for RL on text
