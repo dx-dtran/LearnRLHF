@@ -63,11 +63,13 @@ tests/
   test_grad_sft.py
   test_grad_rm.py
   test_grad_ppo.py
-notes/               # your derivations, one .md per module
+notes/               # theory references (read before coding each module)
+  00-data.md
   01-gpt2.md
   02-sft.md
   03-rm.md
   04-ppo-gae.md
+  04-ppo-kl.md
   04-ppo-policy.md
   05-ppo.md
   06-eval.md
@@ -79,19 +81,23 @@ notes/               # your derivations, one .md per module
 
 For each problem `M.P`:
 
-1. **Read** the `# TODO(M.P):` block in the skeleton file. The docstring states the math
-   and what the tests check.
-2. **Derive.** If the problem has a backward pass, write the derivation in
-   `notes/0M-<topic>.md` *before* typing code. If you can't derive it on paper, you don't
-   understand it yet.
+1. **Read the theory.** Open the relevant `notes/0M-*.md` file and read the derivation
+   for the loss / module you're about to implement. These notes are pre-written theory
+   references; they contain every equation and gradient you'll need. Re-derive the
+   backward passes on paper as you read — if you can't, re-read.
+2. **Read** the `# TODO(M.P):` block in the skeleton file. The docstring states the
+   math and what the tests check.
 3. **Implement** the `TODO`.
 4. **Test.** Run only the test(s) for this problem:
    ```bash
    pytest tests/test_grad_ppo.py::test_ppo_policy_loss_grad -q
    ```
-5. **Green means green.** If rel_err is `1e-3` on a loss that should be `1e-6`, find the
-   off-by-one / sign / mask / shift before continuing.
-6. **Commit** with `git commit -m "M.P: <one line>"`.
+5. **Green means green.** If rel_err is `1e-3` on a loss that should be `1e-6`, find
+   the off-by-one / sign / mask / shift before continuing.
+6. **Annotate.** Each `notes/` file has a "What to commit" section at the end —
+   append your run outputs (loss curves, hparams you changed, surprises) there as you
+   go. Future-you will want them.
+7. **Commit** with `git commit -m "M.P: <one line>"`.
 
 When in doubt: `pytest tests/ -q` and fix the first failing test.
 
@@ -99,47 +105,82 @@ When in doubt: `pytest tests/ -q` and fix the first failing test.
 
 ## 5. Backward passes
 
-Write each derivation in the corresponding `notes/` file before implementing the loss.
+Short summaries. Full derivations live in the corresponding `notes/` file — read the
+note before implementing the loss, and re-derive each gradient on paper as you go.
 
 **1. Causal LM / SFT.**
 
-$$\mathcal{L} = -\frac{1}{N_\text{resp}} \sum_t m_t \log \text{softmax}(Wh_t)_{y_t}$$
+$$
+\mathcal{L} = -\frac{1}{N_\text{resp}} \sum_t m_t \, \log \mathrm{softmax}(W h_t)_{y_t}
+$$
 
-$$\frac{\partial \mathcal{L}}{\partial \text{logits}_t} = \frac{m_t}{N_\text{resp}}\bigl(\text{softmax}(\text{logits}_t) - \mathbf{1}_{y_t}\bigr)$$
+$$
+\frac{\partial \mathcal{L}}{\partial \mathrm{logits}_t}
+= \frac{m_t}{N_\text{resp}} \left( \mathrm{softmax}(\mathrm{logits}_t) - \mathbf{1}_{y_t} \right)
+$$
 
 **2. Reward model (Bradley–Terry).**
 
-$$\mathcal{L} = -\log \sigma(r_c - r_r) = \text{softplus}(r_r - r_c)$$
+$$
+\mathcal{L} = -\log \sigma(r_c - r_r) = \mathrm{softplus}(r_r - r_c)
+$$
 
-$$\frac{\partial \mathcal{L}}{\partial r_c} = \sigma(r_c - r_r) - 1, \qquad \frac{\partial \mathcal{L}}{\partial r_r} = \sigma(r_r - r_c)$$
+$$
+\frac{\partial \mathcal{L}}{\partial r_c} = \sigma(r_c - r_r) - 1,
+\qquad
+\frac{\partial \mathcal{L}}{\partial r_r} = \sigma(r_r - r_c)
+$$
 
 Note the symmetry: the gradients sum to zero.
 
 **3. PPO clipped surrogate.**
 
-$$\rho_t = \exp(\log\pi_t - \log\pi_t^\text{old}), \qquad \mathcal{L}_t^\text{clip} = -\min\!\bigl(\rho_t A_t,\; \text{clip}(\rho_t, 1{-}\varepsilon, 1{+}\varepsilon)\, A_t\bigr)$$
+$$
+\rho_t = \exp(\log \pi_t - \log \pi_t^\text{old})
+$$
 
-When the clip is active and the clipped branch is the safer one, $\partial \mathcal{L}/\partial \log\pi_t = 0$.
-When inactive: $\partial \mathcal{L}/\partial \log\pi_t = -A_t \rho_t$. Sign flips with $\text{sign}(A_t)$.
+$$
+\mathcal{L}_t^\text{clip}
+= -\min\!\left( \rho_t A_t, \; \mathrm{clip}(\rho_t, 1-\varepsilon, 1+\varepsilon) \cdot A_t \right)
+$$
+
+When the clip is active and the clipped branch is the one that would raise the
+objective, $\partial \mathcal{L} / \partial \log \pi_t = 0$.
+When inactive: $\partial \mathcal{L} / \partial \log \pi_t = -A_t \rho_t$. Sign flips
+with $\mathrm{sign}(A_t)$.
 
 **4. KL penalty (per-token).**
 
-$$\text{KL}_t \approx \log\pi_t - \log\pi_t^\text{ref} \quad (k_1\text{ estimator — unbiased, high variance})$$
+$$
+\mathrm{KL}_t \approx \log \pi_t - \log \pi_t^\text{ref}
+\qquad (k_1 \text{ estimator, unbiased, high variance})
+$$
 
-Token reward: $r_t = r_\text{RM} \cdot \mathbf{1}_{t=T} - \beta \cdot \text{KL}_t$.
-Since $\pi^\text{ref}$ is frozen: $\partial \text{KL}_t / \partial \log\pi_t = 1$.
+Token reward: $r_t = r_\text{RM} \cdot \mathbf{1}_{t=T} - \beta \cdot \mathrm{KL}_t$.
+Since $\pi^\text{ref}$ is frozen: $\partial \mathrm{KL}_t / \partial \log \pi_t = 1$.
 
-The $k_3$ estimator $(\rho - 1) - \log\rho$ is bias-reduced and preferred for logging, but nonlinear in $\rho$.
+The $k_3$ estimator $(\rho - 1) - \log \rho$ is nonnegative and lower-variance, preferred
+for logging but nonlinear in $\rho$ as a penalty.
 
 **5. Value loss.**
 
-$$\mathcal{L}_V = \tfrac{1}{2}(V_t - R_t)^2 \quad \text{or clipped variant}$$
+$$
+\mathcal{L}_V = \tfrac{1}{2}(V_t - R_t)^2
+\qquad \text{(or clipped variant; see notes/04-ppo-policy.md)}
+$$
 
 $R_t$ is a stop-gradient constant even though it was computed from $V$ via GAE.
 
 **6. Entropy bonus.**
 
-$$H = -\sum_a \pi(a) \log\pi(a), \qquad \frac{\partial H}{\partial \text{logits}} = \pi \odot (H + \log\pi)$$
+$$
+H = -\sum_a \pi(a) \, \log \pi(a)
+$$
+
+$$
+\frac{\partial H}{\partial \mathrm{logits}}
+= -\, \pi \odot (\log \pi + H)
+$$
 
 Start with coefficient 0; increase if you see premature determinism.
 
@@ -268,41 +309,50 @@ Each function lives in `ppo_core.py` with its own gradient test.
 **4.1 Rollout: `generate_with_logprobs(policy, prompts, max_new_tokens)`.**
 Returns `response_tokens`, `logprobs_old`, `values_old`, `attention_mask`, `response_mask`.
 Single forward per step. Critical: log-prob at position $t$ must be
-$\log p(\text{token}_{t+1} \mid \text{prefix}_{\le t})$.
+$\log p(\mathrm{token}_{t+1} \mid \mathrm{prefix}_{\le t})$.
 Artifact: shape/alignment test passes.
 
 **4.2 Per-token KL.**
 `kl_k1 = logprobs - ref_logprobs` (shape `[B, T_resp]`).
 Include `kl_k3 = (ratio - 1) - log(ratio)` as the logging estimator.
-Explain the variance tradeoff in `notes/04-ppo-gae.md`.
+Explain the variance tradeoff in `notes/04-ppo-kl.md`.
 Artifact: unit test that k1 integrates to expected KL on a known distribution.
 
 **4.3 Reward shaping.**
 Terminal reward $r_\text{RM}$ from RM at `<|im_end|>`; per-token reward
-$r_t = -\beta \cdot \text{KL}_t + r_\text{RM} \cdot \mathbf{1}_{t=T}$.
-Test: β→0 collapses to pure RM terminal reward.
+$r_t = -\beta \cdot \mathrm{KL}_t + r_\text{RM} \cdot \mathbf{1}_{t=T}$.
+Test: $\beta \to 0$ collapses to pure RM terminal reward.
 Artifact: unit test passes.
 
 **4.4 GAE.**
 Given $r_t, V_t, V_{t+1}$ and a done-mask, compute
-$A_t = \sum_k (\gamma\lambda)^k \delta_{t+k}$ where $\delta_t = r_t + \gamma V_{t+1} - V_t$.
+$A_t = \sum_k (\gamma \lambda)^k \delta_{t+k}$ where
+$\delta_t = r_t + \gamma V_{t+1} - V_t$.
 Returns $= A + V$ (value target). Unit-test against a hand-computed 3-step example.
 Derive in `notes/04-ppo-gae.md`.
 Artifact: test passes with hand-computed example.
 
 **4.5 PPO clipped policy loss.**
-$\mathcal{L}_\pi = -\mathbb{E}[\min(\rho A,\, \text{clip}(\rho, 1\pm\varepsilon) A) \cdot \text{mask}]$.
+
+$$
+\mathcal{L}_\pi = -\mathbb{E}\!\left[ \min\!\left( \rho A, \; \mathrm{clip}(\rho, 1-\varepsilon, 1+\varepsilon) \cdot A \right) \cdot \mathrm{mask} \right]
+$$
+
 Derive piecewise gradient in `notes/04-ppo-policy.md`. Gradient-check at fp64.
 Include edge test where every ratio is clipped — gradient must be zero on those tokens.
 Artifact: test_grad_ppo.py::test_ppo_policy_loss_grad passes.
 
 **4.6 Value loss (clipped).**
-$\mathcal{L}_V = \frac{1}{2}\max\!\bigl((V-R)^2,\, (\text{clip}(V, V_\text{old}\pm\varepsilon_v) - R)^2\bigr) \cdot \text{mask}$.
+
+$$
+\mathcal{L}_V = \tfrac{1}{2} \, \max\!\left( (V - R)^2, \; (\mathrm{clip}(V, V_\text{old} - \varepsilon_v, V_\text{old} + \varepsilon_v) - R)^2 \right) \cdot \mathrm{mask}
+$$
+
 Gradient-check. Explain why clipping value helps early training in `notes/04-ppo-policy.md`.
 Artifact: test_grad_ppo.py::test_value_loss_grad passes.
 
 **4.7 Entropy bonus.**
-Mean of $-\sum_a \pi(a)\log\pi(a)$ over masked response tokens. Start at coefficient 0.
+Mean of $-\sum_a \pi(a) \log \pi(a)$ over masked response tokens. Start at coefficient 0.
 Grad-check.
 Artifact: test_grad_ppo.py::test_entropy_grad passes.
 
@@ -327,10 +377,10 @@ For each iteration: sample a batch of prompts, generate responses, compute ref l
 Artifact: one rollout iteration runs without error.
 
 **5.3 Inner loop (optimize phase).**
-For K=4 epochs, iterate minibatches, compute
-$\mathcal{L} = \mathcal{L}_\pi + c_v \mathcal{L}_V - c_\text{ent} H$, backward, clip grad
-norm to 1.0, step. Recompute $\log\pi$ and $V$ freshly each minibatch; $\log\pi^\text{old}$
-is frozen from rollout.
+For $K = 4$ epochs, iterate minibatches, compute
+$\mathcal{L} = \mathcal{L}_\pi + c_v \mathcal{L}_V - c_\text{ent} H$, backward, clip
+grad norm to 1.0, step. Recompute $\log \pi$ and $V$ freshly each minibatch;
+$\log \pi^\text{old}$ is frozen from rollout.
 Artifact: one full inner loop runs without error.
 
 **5.4 Logging.**
