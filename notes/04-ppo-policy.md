@@ -84,14 +84,14 @@ $\varepsilon = 0.2$ is the clip range. Per token:
 
 There are four cases based on the sign of $A_t$ and whether $\rho$ is inside the clip:
 
-| $A_t$ sign | $\rho$ position            | surr$_1$ vs surr$_2$        | min picks | Gradient w.r.t. $\log \pi$ |
+| $A_t$ sign | $\rho$ position            | $\text{surr}_1$ vs $\text{surr}_2$        | min picks | Gradient w.r.t. $\log \pi$ |
 |------------|----------------------------|-----------------------------|-----------|----------------------------|
-| $A > 0$    | $\rho \in [1-\varepsilon, 1+\varepsilon]$ | equal                | surr$_1$  | $-A \cdot \rho$            |
-| $A > 0$    | $\rho > 1 + \varepsilon$   | surr$_1$ bigger (= $\rho A$) | surr$_2$  | **zero** (clipped)         |
-| $A > 0$    | $\rho < 1 - \varepsilon$   | surr$_1$ smaller            | surr$_1$  | $-A \cdot \rho$ (not clipped)|
-| $A < 0$    | $\rho \in [1-\varepsilon, 1+\varepsilon]$ | equal                | surr$_1$  | $-A \cdot \rho$            |
-| $A < 0$    | $\rho < 1 - \varepsilon$   | surr$_1$ less negative      | surr$_2$  | **zero** (clipped)         |
-| $A < 0$    | $\rho > 1 + \varepsilon$   | surr$_1$ more negative      | surr$_1$  | $-A \cdot \rho$ (not clipped)|
+| $A > 0$    | $\rho \in [1-\varepsilon, 1+\varepsilon]$ | equal                | $\text{surr}_1$  | $-A \cdot \rho$            |
+| $A > 0$    | $\rho > 1 + \varepsilon$   | $\text{surr}_1$ bigger (= $\rho A$) | $\text{surr}_2$  | **zero** (clipped)         |
+| $A > 0$    | $\rho < 1 - \varepsilon$   | $\text{surr}_1$ smaller            | $\text{surr}_1$  | $-A \cdot \rho$ (not clipped)|
+| $A < 0$    | $\rho \in [1-\varepsilon, 1+\varepsilon]$ | equal                | $\text{surr}_1$  | $-A \cdot \rho$            |
+| $A < 0$    | $\rho < 1 - \varepsilon$   | $\text{surr}_1$ less negative      | $\text{surr}_2$  | **zero** (clipped)         |
+| $A < 0$    | $\rho > 1 + \varepsilon$   | $\text{surr}_1$ more negative      | $\text{surr}_1$  | $-A \cdot \rho$ (not clipped)|
 
 The pattern: **clipping only fires when it would drag the objective back** (i.e.
 the policy is already moving in a good direction and has gone "too far"). It *does
@@ -119,7 +119,7 @@ zero.
 
 You verify this with an **edge test** in Problem 4.5: set all ratios to a large value
 ($\rho = 5$, say) and $A > 0$. Every token should be in the "$A > 0$, $\rho > 1+\varepsilon$,
-clip picks surr$_2$" regime. Autograd must report exactly zero gradient on those
+clip picks $\text{surr}_2$" regime. Autograd must report exactly zero gradient on those
 tokens. If it reports nonzero, your implementation is using `max` instead of `min`
 or has a sign error.
 
