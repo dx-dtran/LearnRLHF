@@ -27,9 +27,16 @@ love. This failure mode is called **reward hacking**.
 The fix: penalize the policy for wandering too far from where it started (the SFT
 model), measured in KL divergence. The RL objective becomes:
 
-    J_RLHF(theta) = E [ r_RM(trajectory) - beta * sum over t of KL( pi_theta(. | s_t) || pi_ref(. | s_t) ) ]
+$$
+J_{\mathrm{RLHF}}(\theta)
+\;=\; \mathbb{E}\!\left[\, r_{\mathrm{RM}}(\tau) \;-\; \beta \sum_t \mathrm{KL}\bigl(\pi_\theta(\cdot \mid s_t) \,\|\, \pi_{\mathrm{ref}}(\cdot \mid s_t)\bigr) \,\right]
+$$
 
-`beta` controls the strength of the penalty:
+Or in code-style:
+
+    J_RLHF(theta) = E[ r_RM(tau) - beta * sum over t of KL(pi_theta(.|s_t) || pi_ref(.|s_t)) ]
+
+$\beta$ controls the strength of the penalty:
 
 - Small `beta`: policy is free to explore, but reward-hacking risk is high.
 - Large `beta`: policy stays close to SFT, but reward gains will be small.
@@ -53,6 +60,12 @@ Option A: compute a single KL per episode and tack it onto the final reward.
 Option B: distribute the KL penalty across tokens, one per step.
 
 InstructGPT picks option B. The per-token reward becomes:
+
+$$
+r_t \;=\; -\beta \cdot \mathrm{KL}_t \;+\; r_{\mathrm{RM}} \cdot \mathbf{1}[\,t = T_{\mathrm{last}}\,]
+$$
+
+Or in code-style:
 
     r_t = -beta * KL_t + r_RM * (t == last_response_token)
 
@@ -78,21 +91,41 @@ Here's the setup. During rollout, we generated a sequence of tokens from
 We want to estimate the KL divergence between the two policies *at that state*,
 defined as:
 
-    KL( pi_theta(. | s_t) || pi_ref(. | s_t) )
-      = E_{a ~ pi_theta} [ log pi_theta(a | s_t) - log pi_ref(a | s_t) ]
+$$
+\mathrm{KL}\bigl(\pi_\theta(\cdot \mid s_t) \,\|\, \pi_{\mathrm{ref}}(\cdot \mid s_t)\bigr)
+\;=\; \mathbb{E}_{a \sim \pi_\theta}\!\left[\, \log \pi_\theta(a \mid s_t) \,-\, \log \pi_{\mathrm{ref}}(a \mid s_t) \,\right]
+$$
 
-But we don't have access to the full distribution or an exact expectation. We have
-exactly one sample `a_t` drawn from `pi_theta`. What's our best single-sample
-estimate?
+Or in code-style:
+
+    KL(pi_theta(.|s_t) || pi_ref(.|s_t))
+      = E_{a ~ pi_theta}[ log pi_theta(a|s_t) - log pi_ref(a|s_t) ]
+
+But we don't have the full distribution or an exact expectation. We have exactly
+one sample $a_t$ drawn from $\pi_\theta$. What's our best single-sample estimate?
 
 Define the log-ratio for the token we drew:
 
-    L_t  =  log pi_theta(a_t | s_t) - log pi_ref(a_t | s_t)
+$$
+L_t \;=\; \log \pi_\theta(a_t \mid s_t) \,-\, \log \pi_{\mathrm{ref}}(a_t \mid s_t),
+\qquad
+\rho_t \;=\; e^{L_t}
+$$
+
+Or in code-style:
+
+    L_t   = log pi_theta(a_t | s_t) - log pi_ref(a_t | s_t)
     rho_t = exp(L_t)
 
-Three standard estimators, `k_1`, `k_2`, `k_3`:
+Three standard estimators, $k_1$, $k_2$, $k_3$:
 
-### 3.1 `k_1`: the naive log-ratio
+### 3.1 $k_1$: the naive log-ratio
+
+$$
+k_1 \;=\; L_t
+$$
+
+Or in code-style:
 
     k_1 = L_t
 
@@ -105,7 +138,13 @@ Three standard estimators, `k_1`, `k_2`, `k_3`:
 This is what InstructGPT uses as the shaping penalty in the per-token reward. It's
 exactly what we use in `shape_reward`.
 
-### 3.2 `k_2`: half-squared log-ratio
+### 3.2 $k_2$: half-squared log-ratio
+
+$$
+k_2 \;=\; \tfrac{1}{2} L_t^2
+$$
+
+Or in code-style:
 
     k_2 = 0.5 * L_t^2
 
@@ -115,16 +154,23 @@ exactly what we use in `shape_reward`.
   KL in general.
 - Rarely used in modern RLHF. Included here for completeness.
 
-### 3.3 `k_3`: Schulman's unbiased-and-nonnegative
+### 3.3 $k_3$: Schulman's unbiased-and-nonnegative
+
+$$
+k_3 \;=\; (\rho_t - 1) \,-\, L_t \;=\; e^{L_t} - 1 - L_t
+$$
+
+Or in code-style:
 
     k_3 = (rho_t - 1) - L_t
         = exp(L_t) - 1 - L_t
 
-- Always **non-negative**, because `exp(x) - 1 - x >= 0` for all real `x` (the
-  exponential function lies above its tangent at 0). Equality only when `x = 0`.
+- Always **non-negative**, because $e^x - 1 - x \ge 0$ for all real $x$ (the
+  exponential function lies above its tangent at 0, a direct consequence of
+  convexity of $e^x$). Equality only when $x = 0$.
 - **Unbiased** (with a caveat).
-- **Lower variance than `k_1`** in practice: when `k_1` has a big-magnitude
-  negative sample, `k_3` pulls it back up via the `rho - 1` term, and vice versa.
+- **Lower variance than $k_1$** in practice: when $k_1$ has a big-magnitude
+  negative sample, $k_3$ pulls it back up via the $\rho - 1$ term, and vice versa.
 
 A quick geometric picture: `k_1` is just the raw log-ratio of whatever token you
 happened to draw. `k_3` adds a symmetric correction penalizing any deviation of
@@ -161,9 +207,21 @@ Putting it all together. After a rollout we have:
 
 Compute the per-token KL:
 
+$$
+\mathrm{KL}_{k1}[b, t] \;=\; \log \pi_\theta^{\text{old}}(a_t \mid s_t) \,-\, \log \pi_{\mathrm{ref}}(a_t \mid s_t)
+$$
+
+Or in code-style:
+
     KL_k1[b, t] = logprobs_old[b, t] - ref_logprobs[b, t]
 
 And the per-token reward:
+
+$$
+r[b, t] \;=\; -\beta \cdot \mathrm{KL}_{k1}[b, t] \cdot m[b, t] \;+\; r_{\mathrm{RM}}[b] \cdot \mathbf{1}[\,t = T_{\mathrm{last}}(b)\,]
+$$
+
+Or in code-style:
 
     r[b, t] = -beta * KL_k1[b, t] * response_mask[b, t]
               + rm_reward[b] * (t == last_response_token_of_row_b)
