@@ -124,12 +124,16 @@ Possible answers: separate value network; adaptive $\beta$; sample more prompts
 during rollout; use $k_3$ instead of $k_1$ for the KL penalty; handle length bias
 in the RM explicitly; start value head from SFT instead of zero.
 
-### 3.5 Where was the old code wrong?
+### 3.5 What did you get wrong and fix?
 
-Diff your final repo against the `old/` code. Common findings: the old SFT masked
-user turns (or didn't mask anything); the old PPO ratio computation had an
-off-by-one in logit indices; the old value loss didn't clip. This is one of the
-educational points of the exercise.
+Trace back through your git history and identify bugs you caught during development:
+- Did you ever mask the wrong tokens in SFT? (e.g., included user turns, excluded
+  `<|im_end|>`, or used inverted mask).
+- Did you have an off-by-one or alignment bug in the PPO rollout (logprobs vs tokens)?
+- Did you forget to clip the value loss, or compute advantages without masking?
+
+These are the educational points of the exercise — real bugs that arise when implementing
+RLHF from scratch, and how you caught them.
 
 ### 3.6 What did you not understand before, and what do you understand now?
 

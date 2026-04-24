@@ -94,8 +94,8 @@ distribution of `chosen` assistant responses.
   tokens between `<|im_start|>assistant\n` and the following `<|im_end|>`, **including**
   the `<|im_end|>`), else 0.
 
-This last point is the single most common SFT bug and the reason the old code in `old/`
-is broken. See `02-sft.md` for why masking the prompt matters.
+This last point is the single most common SFT bug. See `02-sft.md` for why masking the
+prompt matters — this is critical to get right, as downstream RM and PPO depend on it.
 
 ### 3.2 Preference dataset (for RM)
 
