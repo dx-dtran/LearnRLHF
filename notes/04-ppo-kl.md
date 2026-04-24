@@ -16,6 +16,64 @@ By the end you should be able to:
 
 ---
 
+## 0. A five-minute KL divergence primer
+
+Before we use KL divergence, we should know what it is. If you already do, skim
+this and keep going.
+
+KL divergence is a number that measures **how different two probability
+distributions are**, from the point of view of one of them. For two distributions
+$P$ and $Q$ over the same set of outcomes, the KL divergence from $P$ to $Q$ is:
+
+$$
+\mathrm{KL}(P \| Q) = \sum_x P(x) \cdot \log \frac{P(x)}{Q(x)}
+$$
+
+Or in code-style:
+
+    KL(P || Q) = sum over x of P(x) * log( P(x) / Q(x) )
+
+Five facts to internalize:
+
+1. **It is always non-negative.** $\mathrm{KL}(P \| Q) \ge 0$, with equality iff
+   $P = Q$ everywhere. (This follows from Jensen's inequality applied to the
+   concave function $\log$.)
+2. **It is not symmetric.** $\mathrm{KL}(P \| Q) \ne \mathrm{KL}(Q \| P)$ in
+   general. Despite the name "divergence", it is not a proper distance.
+3. **Units are nats**, because we used natural log. Multiply by
+   $1/\ln 2 \approx 1.44$ to convert to bits.
+4. **It's an expectation under $P$.** $\sum_x P(x) \log(P(x)/Q(x))$ can be read
+   as $\mathbb{E}_{x \sim P}[\log(P(x)/Q(x))]$ — the average log-ratio, averaged
+   over samples drawn from $P$. This is important because PPO only has samples
+   from one distribution.
+5. **It equals zero iff the two distributions agree everywhere.** The smallest
+   disagreement gives a strictly positive number.
+
+A tiny worked example. Say the vocabulary has three outcomes. Policy $\pi$ thinks
+the probabilities are $(0.5,\, 0.3,\, 0.2)$. Reference $\pi_{\mathrm{ref}}$ thinks
+$(0.4,\, 0.4,\, 0.2)$. Plug in:
+
+$$
+\mathrm{KL}(\pi \| \pi_{\mathrm{ref}})
+= 0.5 \log\tfrac{0.5}{0.4} + 0.3 \log\tfrac{0.3}{0.4} + 0.2 \log\tfrac{0.2}{0.2}
+\approx 0.5(0.223) + 0.3(-0.288) + 0.2(0)
+\approx 0.025 \text{ nats}
+$$
+
+Very small. The two distributions are nearly identical. KL grows fast as
+distributions pull apart: if $\pi_{\mathrm{ref}}$ put zero probability on some
+outcome that $\pi$ puts positive probability on, the log-ratio would blow up and
+KL would be infinite. That's why we can't start PPO from random weights; the
+KL penalty would be meaningless.
+
+Intuition for why KL shows up in RLHF: the SFT policy $\pi_{\mathrm{ref}}$ is our
+"sane, coherent English" distribution. Any movement of $\pi_\theta$ away from it
+is reported as a KL number, and we can put a price on that movement. The
+optimization then decides, at every token, whether chasing extra reward is worth
+the KL cost.
+
+---
+
 ## 1. Why a KL penalty?
 
 The reward model is an imperfect proxy for human judgment. If we optimize it
@@ -29,7 +87,7 @@ model), measured in KL divergence. The RL objective becomes:
 
 $$
 J_{\mathrm{RLHF}}(\theta)
-\;=\; \mathbb{E}\!\left[\, r_{\mathrm{RM}}(\tau) \;-\; \beta \sum_t \mathrm{KL}\bigl(\pi_\theta(\cdot \mid s_t) \,\|\, \pi_{\mathrm{ref}}(\cdot \mid s_t)\bigr) \,\right]
+ = \mathbb{E}\left[ r_{\mathrm{RM}}(\tau) - \beta \sum_t \mathrm{KL}\bigl(\pi_\theta(\cdot \mid s_t) \| \pi_{\mathrm{ref}}(\cdot \mid s_t)\bigr) \right]
 $$
 
 Or in code-style:
@@ -62,7 +120,7 @@ Option B: distribute the KL penalty across tokens, one per step.
 InstructGPT picks option B. The per-token reward becomes:
 
 $$
-r_t \;=\; -\beta \cdot \mathrm{KL}_t \;+\; r_{\mathrm{RM}} \cdot \mathbf{1}[\,t = T_{\mathrm{last}}\,]
+r_t = -\beta \cdot \mathrm{KL}_t + r_{\mathrm{RM}} \cdot \mathbf{1}[ t = T_{\mathrm{last}} ]
 $$
 
 Or in code-style:
@@ -92,8 +150,8 @@ We want to estimate the KL divergence between the two policies *at that state*,
 defined as:
 
 $$
-\mathrm{KL}\bigl(\pi_\theta(\cdot \mid s_t) \,\|\, \pi_{\mathrm{ref}}(\cdot \mid s_t)\bigr)
-\;=\; \mathbb{E}_{a \sim \pi_\theta}\!\left[\, \log \pi_\theta(a \mid s_t) \,-\, \log \pi_{\mathrm{ref}}(a \mid s_t) \,\right]
+\mathrm{KL}\bigl(\pi_\theta(\cdot \mid s_t) \| \pi_{\mathrm{ref}}(\cdot \mid s_t)\bigr)
+ = \mathbb{E}_{a \sim \pi_\theta}\left[ \log \pi_\theta(a \mid s_t) - \log \pi_{\mathrm{ref}}(a \mid s_t) \right]
 $$
 
 Or in code-style:
@@ -107,9 +165,9 @@ one sample $a_t$ drawn from $\pi_\theta$. What's our best single-sample estimate
 Define the log-ratio for the token we drew:
 
 $$
-L_t \;=\; \log \pi_\theta(a_t \mid s_t) \,-\, \log \pi_{\mathrm{ref}}(a_t \mid s_t),
+L_t = \log \pi_\theta(a_t \mid s_t) - \log \pi_{\mathrm{ref}}(a_t \mid s_t),
 \qquad
-\rho_t \;=\; e^{L_t}
+\rho_t = e^{L_t}
 $$
 
 Or in code-style:
@@ -122,7 +180,7 @@ Three standard estimators, $k_1$, $k_2$, $k_3$:
 ### 3.1 $k_1$: the naive log-ratio
 
 $$
-k_1 \;=\; L_t
+k_1  =  L_t
 $$
 
 Or in code-style:
@@ -141,7 +199,7 @@ exactly what we use in `shape_reward`.
 ### 3.2 $k_2$: half-squared log-ratio
 
 $$
-k_2 \;=\; \tfrac{1}{2} L_t^2
+k_2  =  \tfrac{1}{2} L_t^2
 $$
 
 Or in code-style:
@@ -157,7 +215,7 @@ Or in code-style:
 ### 3.3 $k_3$: Schulman's unbiased-and-nonnegative
 
 $$
-k_3 \;=\; (\rho_t - 1) \,-\, L_t \;=\; e^{L_t} - 1 - L_t
+k_3 = (\rho_t - 1) - L_t = e^{L_t} - 1 - L_t
 $$
 
 Or in code-style:
@@ -170,7 +228,7 @@ Or in code-style:
   convexity of $e^x$). Equality only when $x = 0$.
 - **Unbiased** (with a caveat).
 - **Lower variance than $k_1$** in practice: when $k_1$ has a big-magnitude
-  negative sample, $k_3$ pulls it back up via the $\rho - 1$ term, and vice versa.
+ negative sample, $k_3$ pulls it back up via the $\rho - 1$ term, and vice versa.
 
 A quick geometric picture: `k_1` is just the raw log-ratio of whatever token you
 happened to draw. `k_3` adds a symmetric correction penalizing any deviation of
@@ -208,7 +266,7 @@ Putting it all together. After a rollout we have:
 Compute the per-token KL:
 
 $$
-\mathrm{KL}_{k1}[b, t] \;=\; \log \pi_\theta^{\text{old}}(a_t \mid s_t) \,-\, \log \pi_{\mathrm{ref}}(a_t \mid s_t)
+\mathrm{KL}_{k1}[b, t] = \log \pi_\theta^{\text{old}}(a_t \mid s_t) - \log \pi_{\mathrm{ref}}(a_t \mid s_t)
 $$
 
 Or in code-style:
@@ -218,7 +276,7 @@ Or in code-style:
 And the per-token reward:
 
 $$
-r[b, t] \;=\; -\beta \cdot \mathrm{KL}_{k1}[b, t] \cdot m[b, t] \;+\; r_{\mathrm{RM}}[b] \cdot \mathbf{1}[\,t = T_{\mathrm{last}}(b)\,]
+r[b, t] = -\beta \cdot \mathrm{KL}_{k1}[b, t] \cdot m[b, t] + r_{\mathrm{RM}}[b] \cdot \mathbf{1}[ t = T_{\mathrm{last}}(b) ]
 $$
 
 Or in code-style:

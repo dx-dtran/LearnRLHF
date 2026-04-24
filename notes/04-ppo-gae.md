@@ -34,7 +34,7 @@ Our "environment" is one episode of assistant generation. Given a prompt `s_0`
 The objective is the expected total reward over a sampled trajectory:
 
 $$
-J(\theta) \;=\; \mathbb{E}_{\tau \sim \pi_\theta}\!\left[\, \sum_t \gamma^t \, r_t \,\right]
+J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\left[ \sum_t \gamma^t r_t \right]
 $$
 
 Or in code-style:
@@ -44,6 +44,33 @@ Or in code-style:
 $\gamma$ is a discount factor in $[0, 1]$. For text RL we use $\gamma = 1$ — episodes
 are short, and we want credit assignment to flow across the entire response without
 the exponential dampening that $\gamma < 1$ would give.
+
+### 1.1 A concrete rollout
+
+If this is your first time meeting RL, the abstractions above can feel slippery.
+Make it concrete. Suppose the prompt is:
+
+    s_0 = "<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n"
+
+The model generates, one token at a time:
+
+| $t$ | State $s_t$                                    | Action $a_t$ (sampled) | Reward $r_t$            |
+|-----|------------------------------------------------|------------------------|-------------------------|
+| 0   | prompt                                         | `"The"`                | small KL penalty only   |
+| 1   | prompt + `"The"`                               | `" answer"`            | small KL penalty only   |
+| 2   | prompt + `"The answer"`                        | `" is"`                | small KL penalty only   |
+| 3   | prompt + `"The answer is"`                     | `" 4"`                 | small KL penalty only   |
+| 4   | prompt + `"The answer is 4"`                   | `"."`                  | small KL penalty only   |
+| 5   | prompt + `"The answer is 4."`                  | `<|im_end|>`           | KL penalty + RM reward  |
+
+Each "state" is the entire token sequence so far. Each "action" is the next
+token the policy samples. Each "reward" is a scalar we compute per token — most
+are just tiny KL penalties, but the last one also carries the big terminal reward
+from the RM (its scalar opinion of the whole response).
+
+That's one rollout. An iteration of PPO generates a batch of many such rollouts
+in parallel. Every quantity in the rest of this note is defined on these
+per-token tuples $(s_t, a_t, r_t)$.
 
 ---
 
@@ -55,7 +82,7 @@ The gradient of the expected return, with respect to the policy parameters $\the
 can be written as:
 
 $$
-\nabla_\theta J \;=\; \mathbb{E}_{\tau \sim \pi_\theta}\!\left[\, \sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t) \cdot \hat G_t \,\right]
+\nabla_\theta J = \mathbb{E}_{\tau \sim \pi_\theta}\left[ \sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t) \cdot \hat G_t \right]
 $$
 
 Or in code-style:
@@ -68,7 +95,7 @@ $\mathbb{E}\bigl[\sum_{k \ge t} \gamma^{k-t} r_k\bigr]$. The simplest choice is 
 Monte Carlo return — just the actual cumulative reward we observed from time $t$:
 
 $$
-\hat G_t \;=\; \sum_{k=t}^{T-1} \gamma^{k-t} \, r_k
+\hat G_t = \sum_{k=t}^{T-1} \gamma^{k-t} r_k
 $$
 
 Or in code-style:
@@ -82,7 +109,7 @@ Do the full derivation on paper at least once. Sketch:
 **Step 1.** Write the objective as a sum (or integral) over trajectories:
 
 $$
-J(\theta) \;=\; \sum_\tau p_\theta(\tau) \cdot R(\tau)
+J(\theta) = \sum_\tau p_\theta(\tau) \cdot R(\tau)
 $$
 
 where $R(\tau) = \sum_t \gamma^t r_t$ is the total return of the trajectory.
@@ -90,36 +117,43 @@ where $R(\tau) = \sum_t \gamma^t r_t$ is the total return of the trajectory.
 **Step 2.** Factor the trajectory probability:
 
 $$
-p_\theta(\tau) \;=\; P(s_0) \,\prod_t \pi_\theta(a_t \mid s_t) \cdot P(s_{t+1} \mid s_t, a_t)
+p_\theta(\tau) = P(s_0) \prod_t \pi_\theta(a_t \mid s_t) \cdot P(s_{t+1} \mid s_t, a_t)
 $$
 
 Only the policy factors depend on $\theta$. The initial state distribution and the
 transition dynamics are "the environment" and we don't control them.
 
-**Step 3.** The **log-derivative trick**. For any function $f(\theta)$:
+**Step 3.** The **log-derivative trick**. For any positive function $f(\theta)$:
 
 $$
-\nabla_\theta f \;=\; f \cdot \nabla_\theta \log f
+\nabla_\theta f = f \cdot \nabla_\theta \log f
 $$
 
-(just rearrange $\nabla \log f = \nabla f / f$). Apply this to $p_\theta(\tau)$:
+This is just the chain rule for $\log$: $\nabla_\theta \log f = (1/f) \cdot
+\nabla_\theta f$, so multiply both sides by $f$. The reason we use this trick:
+we want gradients to appear as expectations (sums of $f \cdot \text{something}$)
+so we can estimate them by averaging over samples. The log-derivative trick is
+the standard move for converting "gradient of a probability" into "probability
+times gradient of log-probability".
+
+Apply it to $p_\theta(\tau)$:
 
 $$
-\nabla_\theta p_\theta(\tau) \;=\; p_\theta(\tau) \cdot \nabla_\theta \log p_\theta(\tau)
+\nabla_\theta p_\theta(\tau) = p_\theta(\tau) \cdot \nabla_\theta \log p_\theta(\tau)
 $$
 
 **Step 4.** Take the gradient of $J$ and push it inside the sum:
 
 $$
-\nabla_\theta J \;=\; \sum_\tau \nabla_\theta p_\theta(\tau) \cdot R(\tau)
-\;=\; \sum_\tau p_\theta(\tau) \cdot \nabla_\theta \log p_\theta(\tau) \cdot R(\tau)
-\;=\; \mathbb{E}_\tau \!\left[\, \nabla_\theta \log p_\theta(\tau) \cdot R(\tau) \,\right]
+\nabla_\theta J = \sum_\tau \nabla_\theta p_\theta(\tau) \cdot R(\tau)
+ = \sum_\tau p_\theta(\tau) \cdot \nabla_\theta \log p_\theta(\tau) \cdot R(\tau)
+ = \mathbb{E}_\tau \left[ \nabla_\theta \log p_\theta(\tau) \cdot R(\tau) \right]
 $$
 
 **Step 5.** Take $\log$ of the factored $p_\theta(\tau)$ and then the gradient:
 
 $$
-\nabla_\theta \log p_\theta(\tau) \;=\; \sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t)
+\nabla_\theta \log p_\theta(\tau) = \sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t)
 $$
 
 The $P(s_0)$ and transition terms drop out because they don't depend on $\theta$.
@@ -155,7 +189,7 @@ Here's a nice fact. For any function $b(s_t)$ that depends only on the state (no
 on the action we took):
 
 $$
-\mathbb{E}_{a \sim \pi}\!\left[\, \nabla_\theta \log \pi(a \mid s_t) \cdot b(s_t) \,\right] \;=\; 0
+\mathbb{E}_{a \sim \pi}\left[ \nabla_\theta \log \pi(a \mid s_t) \cdot b(s_t) \right] = 0
 $$
 
 Why? Because $b(s_t)$ doesn't depend on $a$, it pulls out of the expectation over
@@ -164,17 +198,17 @@ Here's the one-line proof of that inner identity:
 
 $$
 \mathbb{E}_a \bigl[\nabla \log \pi(a \mid s)\bigr]
-\;=\; \sum_a \pi(a \mid s) \cdot \frac{\nabla \pi(a \mid s)}{\pi(a \mid s)}
-\;=\; \sum_a \nabla \pi(a \mid s)
-\;=\; \nabla \sum_a \pi(a \mid s)
-\;=\; \nabla 1 \;=\; 0
+ = \sum_a \pi(a \mid s) \cdot \frac{\nabla \pi(a \mid s)}{\pi(a \mid s)}
+ = \sum_a \nabla \pi(a \mid s)
+ = \nabla \sum_a \pi(a \mid s)
+ =  \nabla 1  =  0
 $$
 
 So we can **subtract** any state-dependent $b(s_t)$ from our return estimate
 without changing the expected gradient:
 
 $$
-\nabla_\theta J \;=\; \mathbb{E}\!\left[\, \sum_t \nabla_\theta \log \pi(a_t \mid s_t) \cdot \bigl(\hat G_t - b(s_t)\bigr) \,\right]
+\nabla_\theta J = \mathbb{E}\left[ \sum_t \nabla_\theta \log \pi(a_t \mid s_t) \cdot \bigl(\hat G_t - b(s_t)\bigr) \right]
 $$
 
 Or in code-style:
@@ -191,7 +225,7 @@ $V(s_t)$. The difference between the observed return and the expected return is
 called the **advantage**:
 
 $$
-A_t \;=\; \hat G_t \,-\, V(s_t)
+A_t  =  \hat G_t  -  V(s_t)
 $$
 
 Read "advantage" literally: how much better (or worse) did this action turn out than
@@ -202,7 +236,7 @@ round — it tells you whether you played above or below expectation.
 The variance-reduced policy gradient:
 
 $$
-\nabla_\theta J \;=\; \mathbb{E}\!\left[\, \sum_t \nabla_\theta \log \pi(a_t \mid s_t) \cdot A_t \,\right]
+\nabla_\theta J = \mathbb{E}\left[ \sum_t \nabla_\theta \log \pi(a_t \mid s_t) \cdot A_t \right]
 $$
 
 Or in code-style:
@@ -219,7 +253,7 @@ gradient algorithm uses.
 Before we define GAE, one more building block: the **one-step TD error**.
 
 $$
-\delta_t \;=\; r_t \,+\, \gamma \, V(s_{t+1}) \,-\, V(s_t)
+\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)
 $$
 
 Or in code-style:
@@ -239,7 +273,7 @@ them to use:
 Use one TD error:
 
 $$
-A_t^{(1)} \;=\; \delta_t
+A_t^{(1)} = \delta_t
 $$
 
 Or in code-style:
@@ -255,7 +289,7 @@ Or in code-style:
 Sum rewards all the way to the episode end:
 
 $$
-A_t^{(\infty)} \;=\; \sum_{k=t}^{T-1} \gamma^{k-t} \, r_k \;-\; V(s_t)
+A_t^{(\infty)} = \sum_{k=t}^{T-1} \gamma^{k-t} r_k - V(s_t)
 $$
 
 Or in code-style:
@@ -271,13 +305,13 @@ You can also use $n$ real rewards and then bootstrap with $V$:
 
 $$
 A_t^{(n)}
-\;=\; r_t + \gamma\, r_{t+1} + \cdots + \gamma^{n-1}\, r_{t+n-1} + \gamma^n V(s_{t+n}) \,-\, V(s_t)
+ = r_t + \gamma r_{t+1} + \cdots + \gamma^{n-1} r_{t+n-1} + \gamma^n V(s_{t+n}) - V(s_t)
 $$
 
 An equivalent form in terms of TD errors:
 
 $$
-A_t^{(n)} \;=\; \sum_{k=0}^{n-1} \gamma^k \, \delta_{t+k}
+A_t^{(n)} = \sum_{k=0}^{n-1} \gamma^k \delta_{t+k}
 $$
 
 Or in code-style:
@@ -302,7 +336,7 @@ GAE is an exponentially weighted average of the n-step advantages for all $n \ge
 In terms of TD errors:
 
 $$
-A_t^{\mathrm{GAE}} \;=\; \sum_{k=0}^{\infty} (\gamma \lambda)^k \, \delta_{t+k}
+A_t^{\mathrm{GAE}} = \sum_{k=0}^{\infty} (\gamma \lambda)^k \delta_{t+k}
 $$
 
 Or in code-style:
@@ -324,9 +358,9 @@ $(\gamma \lambda)$ from the rest:
 
 $$
 A_t^{\mathrm{GAE}}
-\;=\; \delta_t \,+\, \sum_{k=1}^{\infty} (\gamma\lambda)^k \, \delta_{t+k}
-\;=\; \delta_t \,+\, (\gamma\lambda) \sum_{k=0}^{\infty} (\gamma\lambda)^k \, \delta_{t+1+k}
-\;=\; \delta_t \,+\, (\gamma\lambda) \, A_{t+1}^{\mathrm{GAE}}
+ = \delta_t + \sum_{k=1}^{\infty} (\gamma\lambda)^k \delta_{t+k}
+ = \delta_t + (\gamma\lambda) \sum_{k=0}^{\infty} (\gamma\lambda)^k \delta_{t+1+k}
+ = \delta_t + (\gamma\lambda) A_{t+1}^{\mathrm{GAE}}
 $$
 
 Or in code-style:
@@ -338,7 +372,7 @@ Or in code-style:
 So the GAE advantage satisfies the one-line recursion:
 
 $$
-A_t \;=\; \delta_t \,+\, \gamma\lambda \, A_{t+1}
+A_t = \delta_t + \gamma\lambda A_{t+1}
 $$
 
 Boundary condition: at the terminal time $T$, the episode is over, so $V(s_T) = 0$
@@ -367,7 +401,7 @@ zeroed out.
 After computing advantages, the value head needs a regression target. We use:
 
 $$
-R_t \;=\; A_t \,+\, V_t
+R_t  =  A_t  +  V_t
 $$
 
 Or in code-style:
@@ -412,7 +446,7 @@ In classical RL, the environment hands you a reward at every step. For text we
 have to *construct* the per-token reward ourselves:
 
 $$
-r_t \;=\; -\beta \cdot \mathrm{KL}_t(\pi_\theta \,\|\, \pi_{\mathrm{ref}}) \;+\; r_{\mathrm{RM}}(y) \cdot \mathbf{1}[\,t = T_{\mathrm{last}}\,]
+r_t = -\beta \cdot \mathrm{KL}_t(\pi_\theta \| \pi_{\mathrm{ref}}) + r_{\mathrm{RM}}(y) \cdot \mathbf{1}[ t = T_{\mathrm{last}} ]
 $$
 
 Or in code-style:
@@ -449,11 +483,11 @@ Before feeding advantages into the PPO policy loss, normalize them across valid
 tokens so they have mean 0 and std 1:
 
 $$
-\mu \;=\; \frac{\sum_{b,t} m_{b,t}\, A_{b,t}}{\sum_{b,t} m_{b,t}},
+\mu = \frac{\sum_{b,t} m_{b,t} A_{b,t}}{\sum_{b,t} m_{b,t}},
 \qquad
-\sigma^2 \;=\; \frac{\sum_{b,t} m_{b,t}\, (A_{b,t} - \mu)^2}{\sum_{b,t} m_{b,t}},
+\sigma^2 = \frac{\sum_{b,t} m_{b,t} (A_{b,t} - \mu)^2}{\sum_{b,t} m_{b,t}},
 \qquad
-\tilde A \;=\; \frac{A - \mu}{\sqrt{\sigma^2} + \varepsilon}
+\tilde A = \frac{A - \mu}{\sqrt{\sigma^2} + \varepsilon}
 $$
 
 Or in code-style:

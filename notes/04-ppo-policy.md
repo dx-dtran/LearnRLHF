@@ -6,7 +6,7 @@ Theory packet for Problems 4.5, 4.6, and 4.7. Derive and reason about the three
 terms that make up the PPO loss:
 
 $$
-L_{\mathrm{PPO}} \;=\; L_{\mathrm{policy}} \,+\, c_v \cdot L_{\mathrm{value}} \,-\, c_{\mathrm{ent}} \cdot H
+L_{\mathrm{PPO}} = L_{\mathrm{policy}} + c_v \cdot L_{\mathrm{value}} - c_{\mathrm{ent}} \cdot H
 $$
 
 Or in code-style:
@@ -25,10 +25,26 @@ By the end you should be able to:
 
 ## 1. Setup: importance-sampled policy gradient
 
+Before the equations, a plain-English sketch of PPO's one idea. Vanilla policy
+gradient says: sample a trajectory from the current policy, and nudge the
+parameters so the good actions become more likely. Two problems:
+
+1. Sampling trajectories is expensive — each one requires a full autoregressive
+   generation of up to 256 tokens. We'd rather reuse each batch of samples for
+   several gradient steps.
+2. Once we've taken a step, the old samples aren't drawn from the new policy
+   anymore, so the naive gradient is biased.
+
+PPO fixes both with a two-step trick: (a) use importance sampling to reuse the
+batch for multiple gradient updates, and (b) *clip* the importance ratio so that
+after a few updates the policy can't wander far enough from the rollout policy
+to make the estimator blow up. The rest of this note is just making that trick
+precise.
+
 Recall from `04-ppo-gae.md` that the policy gradient with advantage baseline is:
 
 $$
-\nabla_\theta J \;=\; \mathbb{E}_{\tau \sim \pi_\theta}\!\left[\, \sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t) \cdot A_t \,\right]
+\nabla_\theta J = \mathbb{E}_{\tau \sim \pi_\theta}\left[ \sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t) \cdot A_t \right]
 $$
 
 Or in code-style:
@@ -47,15 +63,15 @@ $\pi_{\mathrm{old}}$, frozen at the start of the current outer iteration. We rew
 the objective as an expectation under $\pi_{\mathrm{old}}$ with an importance weight:
 
 $$
-J(\theta) \;=\; \mathbb{E}_{\tau \sim \pi_{\mathrm{old}}}\!\left[\, \sum_t \rho_t(\theta) \cdot A_t \,\right]
+J(\theta) = \mathbb{E}_{\tau \sim \pi_{\mathrm{old}}}\left[ \sum_t \rho_t(\theta) \cdot A_t \right]
 $$
 
 where the **importance ratio** is:
 
 $$
 \rho_t(\theta)
-\;=\; \frac{\pi_\theta(a_t \mid s_t)}{\pi_{\mathrm{old}}(a_t \mid s_t)}
-\;=\; \exp\!\bigl(\log \pi_\theta(a_t \mid s_t) \,-\, \log \pi_{\mathrm{old}}(a_t \mid s_t)\bigr)
+ = \frac{\pi_\theta(a_t \mid s_t)}{\pi_{\mathrm{old}}(a_t \mid s_t)}
+ = \exp\bigl(\log \pi_\theta(a_t \mid s_t) - \log \pi_{\mathrm{old}}(a_t \mid s_t)\bigr)
 $$
 
 Or in code-style:
@@ -81,9 +97,9 @@ the batch while preventing the policy from moving too far per update.
 For each token, define two candidate surrogates:
 
 $$
-\mathrm{surr}_1 \;=\; \rho \cdot A,
+\mathrm{surr}_1 = \rho \cdot A,
 \qquad
-\mathrm{surr}_2 \;=\; \mathrm{clip}(\rho,\, 1 - \varepsilon,\, 1 + \varepsilon) \cdot A
+\mathrm{surr}_2 = \mathrm{clip}(\rho, 1 - \varepsilon, 1 + \varepsilon) \cdot A
 $$
 
 where $\mathrm{clip}(x, \text{lo}, \text{hi})$ pins $x$ to the range
@@ -97,13 +113,13 @@ Or in code-style:
 The PPO per-token loss is:
 
 $$
-L_{\mathrm{clip},t} \;=\; -\min(\mathrm{surr}_1,\, \mathrm{surr}_2)
+L_{\mathrm{clip},t} = -\min(\mathrm{surr}_1, \mathrm{surr}_2)
 $$
 
 And the total policy loss, normalized by the number of valid tokens:
 
 $$
-L_{\mathrm{policy}} \;=\; \frac{1}{N} \sum_{b,t} m_{b,t} \cdot L_{\mathrm{clip},t}
+L_{\mathrm{policy}} = \frac{1}{N} \sum_{b,t} m_{b,t} \cdot L_{\mathrm{clip},t}
 $$
 
 Or in code-style:
@@ -119,6 +135,27 @@ objective (before the negation), we take the *minimum* of `surr1` and `surr2`,
 i.e. the less favorable one. This is the key idea — the surrogate is set up so
 that the policy cannot be rewarded for running the ratio far outside
 `[1 - eps, 1 + eps]` in the direction of increasing the objective.
+
+A quick sanity check with numbers. Set $\varepsilon = 0.2$ so the clip range is
+$[0.8,\, 1.2]$. Pick two tokens:
+
+- **Token A (good action).** Advantage $A = +1$ (this action turned out better
+  than expected). Current ratio $\rho = 1.5$ — the policy has moved so that this
+  token is 1.5x more likely than it was at rollout. Compute:
+  $\mathrm{surr}_1 = 1.5$, $\mathrm{surr}_2 = 1.2$. $\min = 1.2$. Loss
+  $= -1.2$. The gradient is **zero** because the flat clipped branch won the
+  $\min$ — no further pushing this token upward; it's already moved too far.
+- **Token B (bad action).** Advantage $A = -1$. Ratio $\rho = 1.5$. Compute:
+  $\mathrm{surr}_1 = -1.5$, $\mathrm{surr}_2 = -1.2$. $\min = -1.5$. Loss
+  $= +1.5$. The gradient is **non-zero** and it pushes $\rho$ down — which is
+  what we want, because this action turned out badly and we want to make it
+  less likely. The clip does NOT fire here, because firing it would soften our
+  response to a bad action we want to suppress.
+
+That asymmetry is the whole point: we are only "pessimistic" (clip to avoid big
+moves) when the policy would otherwise enjoy a reward for a move that has already
+gotten extreme. If the move is extreme in a *costly* direction, we let the
+gradient keep flowing.
 
 ### 2.2 What "pessimistic" means, case by case
 
@@ -147,13 +184,13 @@ For the unclipped case, the per-token loss is $L = -\rho A$. Using
 $\rho = \exp(\log \pi_\theta - \log \pi_{\mathrm{old}})$:
 
 $$
-\frac{\partial \rho}{\partial \log \pi_\theta} \;=\; \rho
+\frac{\partial \rho}{\partial \log \pi_\theta} = \rho
 $$
 
 So by the chain rule:
 
 $$
-\frac{\partial L}{\partial \log \pi_\theta} \;=\; -A \cdot \rho
+\frac{\partial L}{\partial \log \pi_\theta} = -A \cdot \rho
 $$
 
 Or in code-style:
@@ -169,7 +206,7 @@ The clip saturates, so changing $\log \pi_\theta$ doesn't change $\mathrm{surr}_
 Therefore:
 
 $$
-\frac{\partial L}{\partial \log \pi_\theta} \;=\; 0
+\frac{\partial L}{\partial \log \pi_\theta} = 0
 $$
 
 Or in code-style:
@@ -207,7 +244,7 @@ why everyone uses PPO.
 The value head's job is to regress toward the GAE return:
 
 $$
-R_t \;=\; A_t \,+\, V_{\mathrm{old}}(s_t)
+R_t = A_t + V_{\mathrm{old}}(s_t)
 $$
 
 which is computed at rollout time and treated as a constant during optimization
@@ -218,7 +255,7 @@ which is computed at rollout time and treated as a constant during optimization
 The simplest value loss is plain MSE:
 
 $$
-L_{V,\mathrm{unclipped}} \;=\; \frac{1}{2N} \sum_{b,t} m_{b,t} \cdot \bigl(V_\theta(s_t) - R_t\bigr)^2
+L_{V,\mathrm{unclipped}} = \frac{1}{2N} \sum_{b,t} m_{b,t} \cdot \bigl(V_\theta(s_t) - R_t\bigr)^2
 $$
 
 Or in code-style:
@@ -232,17 +269,17 @@ Gradient is `mask * (V_theta - R) * dV_theta/dtheta` — standard MSE.
 The clipped value loss mirrors the policy clip. Define:
 
 $$
-V_{\mathrm{clipped}}(s_t) \;=\; V_{\mathrm{old}}(s_t) \,+\, \mathrm{clip}\bigl(V_\theta(s_t) - V_{\mathrm{old}}(s_t),\; -\varepsilon_v,\; +\varepsilon_v\bigr)
+V_{\mathrm{clipped}}(s_t) = V_{\mathrm{old}}(s_t) + \mathrm{clip}\bigl(V_\theta(s_t) - V_{\mathrm{old}}(s_t), -\varepsilon_v, +\varepsilon_v\bigr)
 $$
 
 Then:
 
 $$
-\mathrm{per\text{-}tok\, loss} \;=\; \tfrac{1}{2} \, \max\!\left((V_\theta - R)^2,\; (V_{\mathrm{clipped}} - R)^2\right)
+\mathrm{per\text{-}tok loss} = \tfrac{1}{2} \max\left((V_\theta - R)^2, (V_{\mathrm{clipped}} - R)^2\right)
 $$
 
 $$
-L_V \;=\; \frac{1}{N} \sum_{b,t} m_{b,t} \cdot \mathrm{per\text{-}tok\, loss}_{b,t}
+L_V = \frac{1}{N} \sum_{b,t} m_{b,t} \cdot \mathrm{per\text{-}tok loss}_{b,t}
 $$
 
 Or in code-style:
@@ -299,7 +336,7 @@ you'd compute by hand for the selected branch.
 Add the negated entropy of the policy to the loss:
 
 $$
-L_{\mathrm{total}} \;=\; L_{\mathrm{policy}} \,+\, c_v \cdot L_{\mathrm{value}} \,-\, c_{\mathrm{ent}} \cdot H(\pi_\theta)
+L_{\mathrm{total}} = L_{\mathrm{policy}} + c_v \cdot L_{\mathrm{value}} - c_{\mathrm{ent}} \cdot H(\pi_\theta)
 $$
 
 Or in code-style:
@@ -320,13 +357,13 @@ near zero, generations getting repetitive), bump it to `0.01`.
 For one position, the entropy of the per-token distribution $p$ over the vocab is:
 
 $$
-H(p) \;=\; -\sum_v p_v \, \log p_v
+H(p) = -\sum_v p_v \log p_v
 $$
 
 For a batch of positions:
 
 $$
-H_{\mathrm{batch}} \;=\; \frac{1}{N} \sum_{b,t} m_{b,t} \cdot H(p_{b,t})
+H_{\mathrm{batch}} = \frac{1}{N} \sum_{b,t} m_{b,t} \cdot H(p_{b,t})
 $$
 
 Or in code-style:
@@ -339,7 +376,7 @@ Or in code-style:
 Let $z$ be the logits and $p = \mathrm{softmax}(z)$. Start from the definition:
 
 $$
-H \;=\; -\sum_v p_v \, \log p_v
+H = -\sum_v p_v \log p_v
 $$
 
 Differentiating $p_v \log p_v$ with respect to $z_u$ gives
@@ -348,7 +385,7 @@ $\partial \log p_v / \partial p_v = 1/p_v$). So:
 
 $$
 \frac{\partial H}{\partial z_u}
-\;=\; -\sum_v \frac{\partial p_v}{\partial z_u} \cdot \bigl(\log p_v + 1\bigr)
+ = -\sum_v \frac{\partial p_v}{\partial z_u} \cdot \bigl(\log p_v + 1\bigr)
 $$
 
 Now plug in the softmax derivative
@@ -356,7 +393,7 @@ $\partial p_v / \partial z_u = p_v(\delta_{v,u} - p_u)$ from `02-sft.md`:
 
 $$
 \frac{\partial H}{\partial z_u}
-\;=\; -\sum_v p_v (\delta_{v,u} - p_u) \cdot (\log p_v + 1)
+ = -\sum_v p_v (\delta_{v,u} - p_u) \cdot (\log p_v + 1)
 $$
 
 Split the $(\delta_{v,u} - p_u)$ into the two pieces. The $\delta_{v,u}$ piece picks
@@ -364,7 +401,7 @@ out only the $v = u$ term. The $-p_u$ piece factors out of the sum:
 
 $$
 \frac{\partial H}{\partial z_u}
-\;=\; -\,p_u (\log p_u + 1) \;+\; p_u \sum_v p_v (\log p_v + 1)
+ = - p_u (\log p_u + 1) + p_u \sum_v p_v (\log p_v + 1)
 $$
 
 The sum on the right equals $-H + 1$ (since $\sum_v p_v \log p_v = -H$ and
@@ -372,14 +409,14 @@ $\sum_v p_v = 1$). Substitute:
 
 $$
 \frac{\partial H}{\partial z_u}
-\;=\; -p_u (\log p_u + 1) \,+\, p_u \cdot (-H + 1)
-\;=\; -p_u \,(\log p_u + H)
+ = -p_u (\log p_u + 1) + p_u \cdot (-H + 1)
+ = -p_u (\log p_u + H)
 $$
 
 In vector form:
 
 $$
-\nabla_z H \;=\; -p \,\odot\, (\log p + H)
+\nabla_z H = -p \odot (\log p + H)
 $$
 
 (elementwise product). Or in code-style:
