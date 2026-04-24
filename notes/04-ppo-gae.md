@@ -2,169 +2,177 @@
 
 ## Purpose
 
-Theory for Problem 4.4 (and the conceptual backbone for all of Module 4). This file
+Theory packet for Problem 4.4 (and conceptual backbone for all of Module 4). This file
 covers:
 
-1. The policy gradient theorem.
+1. The policy gradient theorem — the central identity of RL.
 2. Why we subtract a baseline — variance reduction.
-3. The bias–variance spectrum between one-step TD and Monte Carlo returns.
-4. The GAE recursion that linearly combines them, and how to derive it from scratch.
-5. How to use GAE on *per-token* rewards for language generation.
+3. The bias–variance trade-off between one-step TD and full Monte Carlo returns.
+4. GAE, the recursion that lets us dial between those two extremes.
+5. How all of this plays out for per-token rewards on text.
 
-The closely related KL penalty and PPO policy loss have their own note files
-(`04-ppo-kl.md` and `04-ppo-policy.md`). Read those after this one.
+Related notes: `04-ppo-kl.md` (the KL penalty) and `04-ppo-policy.md` (the PPO
+clipped surrogate, value loss, entropy). Read those after this one.
 
 ---
 
 ## 1. Notation for RL on text
 
-Our "environment" is a single episode of assistant generation. For a given prompt $s_0$
-(which is a sequence of tokens), the policy $\pi_\theta$ rolls out a response token by
-token:
+Our "environment" is one episode of assistant generation. Given a prompt `s_0`
+(a sequence of tokens), the policy `pi_theta` generates a response token by token:
 
-- State at time $t$: $s_t = (\text{prompt}, a_0, a_1, \dots, a_{t-1})$ — everything the
-  model has seen so far.
-- Action at time $t$: $a_t$, the next token sampled from $\pi_\theta(\cdot \mid s_t)$.
-- Transition: deterministic. $s_{t+1} = s_t \circ a_t$ (concatenation).
-- Reward: given by a **reward signal** we construct from the RM and a KL penalty —
-  we'll define this in `04-ppo-kl.md`. For now treat $r_t$ as given per token.
-- Episode ends at $t = T$ when the policy emits `<|im_end|>` or hits the max response
-  length.
+- **State at time `t`**: `s_t = (prompt, a_0, a_1, ..., a_{t-1})` — everything the
+  model has seen and produced so far.
+- **Action at time `t`**: `a_t`, the next token, sampled from
+  `pi_theta(. | s_t)`.
+- **Transition**: deterministic. `s_{t+1} = s_t` with `a_t` appended.
+- **Reward**: a per-token signal `r_t` that we *construct* from the RM and a KL
+  penalty. We'll define this in `04-ppo-kl.md`. For now just take `r_t` as given.
+- **Termination**: the episode ends at time `T` when the policy emits `<|im_end|>`,
+  or when it hits the maximum response length.
 
-The objective:
+The objective is the expected total reward over a sampled trajectory:
 
-$$
-J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\!\left[\sum_{t=0}^{T-1} \gamma^t r_t\right],
-$$
+    J(theta) = E_{tau ~ pi_theta} [ sum_t gamma^t * r_t ]
 
-where $\tau$ is a full trajectory and $\gamma \in [0, 1]$ is the discount. For text we
-use $\gamma = 1$: trajectories are short and we want credit assignment across the
-whole response.
+`gamma` is a discount factor in `[0, 1]`. For text RL we use `gamma = 1` — episodes
+are short, and we want credit assignment to flow across the entire response.
 
 ---
 
 ## 2. The policy gradient theorem
 
-### 2.1 Statement
+### 2.1 What it says
 
-$$
-\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\!\left[\sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t) \cdot \hat G_t\right],
-$$
+The gradient of the expected return, with respect to the policy parameters `theta`,
+can be written as:
 
-where $\hat G_t$ is any unbiased estimate of $\mathbb{E}[\sum_{k \ge t} \gamma^{k-t} r_k]$,
-the return from $t$ onward. The simplest choice is the Monte Carlo return itself:
+    grad J = E_{tau ~ pi_theta} [ sum_t grad log pi_theta(a_t | s_t) * G_hat_t ]
 
-$$
-\hat G_t = \sum_{k=t}^{T-1} \gamma^{k-t} r_k.
-$$
+where `G_hat_t` is any unbiased estimate of "the return from time `t` onward",
+meaning `E[ sum over k >= t of gamma^{k-t} * r_k ]`. The simplest choice is the
+Monte Carlo return — just the actual cumulative reward we observed from time `t`:
 
-### 2.2 Where it comes from
+    G_hat_t = sum over k = t..T-1 of gamma^{k-t} * r_k
 
-Sketch of the derivation (do it in full on paper at least once):
+### 2.2 Where it comes from (sketch)
 
-- $J(\theta) = \sum_\tau p_\theta(\tau) R(\tau)$ where $R(\tau)$ is total return.
-- $p_\theta(\tau) = P(s_0) \prod_t \pi_\theta(a_t \mid s_t) P(s_{t+1} \mid s_t, a_t)$.
-  Only the $\pi_\theta$ terms depend on $\theta$.
-- $\nabla \log p_\theta(\tau) = \sum_t \nabla \log \pi_\theta(a_t \mid s_t)$.
-- Apply the log-derivative trick: $\nabla J = \mathbb{E}[\nabla \log p_\theta \cdot R]$.
-- Causality: action $a_t$ can only affect rewards at times $\ge t$, so you can replace
-  $R$ with $\hat G_t$ inside the sum.
+Do the full derivation on paper at least once. Sketch:
 
-### 2.3 What it means in practice
+- `J(theta) = sum over trajectories tau of p_theta(tau) * R(tau)`, where `R(tau)`
+  is the total return of the trajectory.
+- Factor the trajectory probability:
+  `p_theta(tau) = P(s_0) * product_t pi_theta(a_t | s_t) * P(s_{t+1} | s_t, a_t)`.
+  Only the policy factors depend on `theta`.
+- Take `log` and then `grad`: `grad log p_theta(tau) = sum_t grad log pi_theta(a_t | s_t)`.
+  The transition probabilities and initial state drop out because they don't depend
+  on `theta`.
+- Use the log-derivative trick: `grad J = E[ grad log p_theta(tau) * R(tau) ]`.
+- Apply causality: action `a_t` can only affect rewards from time `t` onward. So
+  inside the sum over `t`, we can replace the total return `R(tau)` with just the
+  return-to-go `G_hat_t` without changing the expectation.
 
-At every position $t$, for every token $a_t$ we sampled, we push its log-probability
-**up** in proportion to how good the resulting future was ($\hat G_t > 0$) or **down**
-if it was bad ($\hat G_t < 0$).
+### 2.3 What this means intuitively
 
-The policy gradient is intuitive and correct, but $\hat G_t$ (the Monte Carlo return)
-has very high variance — one trajectory's sum is noisy, and trajectories are
-expensive (each one requires a full rollout). Reducing variance without introducing
-bias is the whole game from here.
+At each position `t`, for the token `a_t` we actually sampled, we nudge the model to
+make that token *more likely* (positive gradient on its log-probability) if the
+future went well (`G_hat_t > 0`), and *less likely* if the future went badly. The
+size of the nudge is proportional to how much better or worse than zero the future
+was.
+
+That's it. That's the policy gradient. It's intuitive and correct.
+
+**But**: Monte Carlo returns `G_hat_t` are *very noisy*. A single trajectory's
+cumulative reward depends on many sampled tokens' worth of randomness. So even if
+our policy is good, the gradient estimate has huge variance. Lowering that variance
+without introducing bias is the whole game from here on.
 
 ---
 
-## 3. The baseline: advantage estimation
+## 3. Baselines and advantages
 
-Observation: for any function $b(s_t)$ that depends only on the state (not the action),
+Here's a nice fact. For any function `b(s_t)` that depends only on the state (not
+on the action we took):
 
-$$
-\mathbb{E}_{a_t \sim \pi}\!\left[\nabla \log \pi(a_t \mid s_t) \cdot b(s_t)\right] = 0.
-$$
+    E_{a ~ pi} [ grad log pi(a | s_t) * b(s_t) ]  =  0
 
-(Proof: $b$ pulls out of the expectation over $a_t$; what remains is
-$\mathbb{E}_a[\nabla \log \pi] = \nabla \mathbb{E}_a[1] = 0$.)
+Why? Because `b(s_t)` doesn't depend on `a`, so it pulls out of the expectation
+over `a`. What's left is `E_a[ grad log pi(a | s_t) ]`, which equals
+`grad E_a[ 1 ] = grad 1 = 0`.
 
-So subtracting $b(s_t)$ from $\hat G_t$ does not change the expected gradient. But it
-can drastically reduce variance — especially if $b(s_t)$ is close to
-$\mathbb{E}[\hat G_t \mid s_t]$. The "advantage":
+So we can *subtract* any state-dependent `b(s_t)` from our return estimate
+without changing the expected gradient:
 
-$$
-A_t = \hat G_t - V(s_t),
-$$
+    grad J  =  E[ sum_t grad log pi(a_t | s_t) * (G_hat_t - b(s_t)) ]
 
-where $V(s_t)$ is our *value estimate* — a learned function (the value head) that
-approximates $\mathbb{E}[\hat G_t \mid s_t]$. Intuitively: the advantage is "how much
-better did this action turn out than what I expected before I took it?" Subtracting
-the baseline removes the bulk of trajectory-level noise (e.g. "this prompt is just an
-easy one") and keeps only the action-specific signal.
+This is unbiased for any choice of `b(s_t)`. But a good choice of `b` can slash
+the variance of the estimator. The best choice is `b(s_t) = E[G_t | s_t]` — the
+expected return starting from state `s_t` — because subtracting it leaves behind
+only the *action-specific* deviation from the average.
 
-Variance-reduced policy gradient:
+We learn such a `b` with a neural network and call it the **value function**
+`V(s_t)`. The difference between the observed return and the expected return is
+called the **advantage**:
 
-$$
-\nabla_\theta J = \mathbb{E}\!\left[\sum_t \nabla \log \pi_\theta(a_t \mid s_t) \cdot A_t\right].
-$$
+    A_t = G_hat_t - V(s_t)
 
-This is still unbiased as long as $V$ is a function of state only.
+Read "advantage" literally: how much better (or worse) did this action turn out than
+what we expected before taking it?
+
+The variance-reduced policy gradient:
+
+    grad J = E[ sum_t grad log pi(a_t | s_t) * A_t ]
+
+Still unbiased. Much lower variance in practice. This is what every modern policy
+gradient algorithm uses.
 
 ---
 
 ## 4. TD error and the bias–variance spectrum
 
-Define the **one-step TD error** at time $t$ as:
+Before we define GAE, one more building block: the **one-step TD error**.
 
-$$
-\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t).
-$$
+    delta_t  =  r_t + gamma * V(s_{t+1}) - V(s_t)
 
-This is "the part of the return I didn't expect": the actual reward plus the next
-state's value minus the current state's value.
+Read this as: "the reward I actually got, plus what the value function says is left
+to earn from the next state, minus what I had expected from this state". It's the
+part of the return at time `t` that wasn't predicted by the value function. (TD
+stands for "temporal difference".)
 
-Two extreme advantage estimators:
+We can build advantage estimators out of TD errors, and we can pick how many of
+them to use:
 
-### 4.1 One-step TD ($\lambda = 0$)
+### 4.1 One-step advantage
 
-$$
-A_t^{(0)} = \delta_t = r_t + \gamma V(s_{t+1}) - V(s_t).
-$$
+Use one TD error:
 
-- **Low variance** — depends on a single reward sample.
-- **High bias** — inherits any error in $V(s_{t+1})$. If $V$ is a bad estimate, so is
-  $A^{(0)}$.
+    A_t^(0) = delta_t
 
-### 4.2 Monte Carlo return ($\lambda = 1$)
+- **Low variance**: depends on only one reward sample.
+- **High bias**: relies heavily on `V(s_{t+1})` being accurate. If `V` is wrong, so
+  is this advantage.
 
-$$
-A_t^{(\infty)} = \sum_{k=t}^{T-1} \gamma^{k-t} r_k - V(s_t)
-= \sum_{k=t}^{T-1} \gamma^{k-t}\, \delta_k \cdot \text{(plus telescoping )}.
-$$
+### 4.2 Monte Carlo advantage
 
-(See derivation below.)
+Sum rewards all the way to the episode end:
 
-- **Zero bias** (doesn't use $V$ anywhere in the future; only as the baseline at
-  time $t$).
-- **High variance** — sums rewards over the whole tail.
+    A_t^(infinity) = sum over k = t..T-1 of gamma^{k-t} * r_k  -  V(s_t)
 
-### 4.3 n-step returns
+- **Zero bias**: doesn't trust `V` at all except as the baseline at time `t`.
+- **High variance**: the tail of rewards is noisy.
 
-For any $n$:
+### 4.3 n-step in between
 
-$$
-A_t^{(n)} = r_t + \gamma r_{t+1} + \dots + \gamma^{n-1} r_{t+n-1} + \gamma^n V(s_{t+n}) - V(s_t)
-= \sum_{k=0}^{n-1} \gamma^k \delta_{t+k}.
-$$
+You can also use `n` real rewards and then bootstrap:
 
-Mid-spectrum: bias falls off with $n$, variance grows with $n$. GAE lets us interpolate
-between all of these with a single knob $\lambda$.
+    A_t^(n) = r_t + gamma * r_{t+1} + ... + gamma^{n-1} * r_{t+n-1} + gamma^n * V(s_{t+n}) - V(s_t)
+            = sum over k = 0..n-1 of gamma^k * delta_{t+k}
+
+(The second line is a nice algebraic identity — check it by expanding the definition
+of `delta`. The intermediate `V` terms telescope.)
+
+As `n` grows, bias falls and variance rises. GAE gives us a single knob that slides
+smoothly between these choices.
 
 ---
 
@@ -172,138 +180,149 @@ between all of these with a single knob $\lambda$.
 
 ### 5.1 Definition
 
-GAE is an exponentially weighted average of the $A_t^{(n)}$ for all $n \ge 1$:
+GAE is an exponentially weighted average of the n-step advantages for all `n >= 1`.
+In terms of TD errors:
 
-$$
-A_t^{\text{GAE}(\gamma, \lambda)} = \sum_{k=0}^{\infty} (\gamma \lambda)^k \, \delta_{t+k}.
-$$
+    A_t^GAE  =  sum over k = 0, 1, 2, ... of (gamma * lambda)^k * delta_{t+k}
 
-- $\lambda = 0$: GAE collapses to the one-step TD error $\delta_t$.
-- $\lambda = 1$: GAE collapses to the Monte Carlo advantage (no bias, all variance).
-- $\lambda \in (0, 1)$: interpolate. Typical choice for text RL: $\lambda = 0.95$.
+The knob is `lambda` in `[0, 1]`:
 
-### 5.2 Deriving the recursion (do this by hand)
+- `lambda = 0`: GAE collapses to one-step TD, `A_t = delta_t`. Low variance, high
+  bias.
+- `lambda = 1`: GAE collapses to Monte Carlo. No bias, high variance.
+- `lambda` in between: smoothly interpolate. The standard choice for text RL is
+  `lambda = 0.95`.
 
-Split the sum at $k = 0$:
+### 5.2 Deriving the recursion
 
-$$
-A_t = \delta_t + \sum_{k=1}^{\infty} (\gamma \lambda)^k \delta_{t+k}
-    = \delta_t + (\gamma \lambda)\sum_{k=0}^{\infty}(\gamma \lambda)^k \delta_{t+1+k}
-    = \delta_t + \gamma \lambda \, A_{t+1}.
-$$
+This is the clever trick. Split off the first term of the sum:
 
-So
+    A_t = delta_t + sum over k = 1, 2, ... of (gamma*lambda)^k * delta_{t+k}
+        = delta_t + (gamma*lambda) * sum over k = 0, 1, ... of (gamma*lambda)^k * delta_{t+1+k}
+        = delta_t + (gamma*lambda) * A_{t+1}
 
-$$
-\boxed{\; A_t = \delta_t + \gamma \lambda\, A_{t+1}. \;}
-$$
+So the GAE advantage satisfies:
 
-Boundary condition: at the terminal time $T$, the episode ends, so $V(s_T) = 0$ by
-convention and $A_T = 0$.
+    A_t = delta_t + gamma * lambda * A_{t+1}
+
+Boundary condition: at the terminal time `T`, the episode is over, so `V(s_T) = 0`
+by convention and `A_T = 0`.
+
+This recursion runs *backwards* through time, from `T-1` down to `0`, and that's
+how we compute it in code.
 
 ### 5.3 Algorithm
 
 ```
-V_T = 0
-A_T = 0
+A[T]     = 0
+V[T]     = 0              # by convention
 for t = T-1, T-2, ..., 0:
-    delta_t = r_t + gamma * V_{t+1} * nonterm_{t+1} - V_t
-    A_t     = delta_t + gamma * lam * A_{t+1} * nonterm_{t+1}
+    delta_t = r[t] + gamma * V[t+1] * nonterm[t+1] - V[t]
+    A[t]    = delta_t + gamma * lambda * A[t+1] * nonterm[t+1]
 ```
 
-where `nonterm_{t+1} = mask[t+1]` (1 if position $t+1$ is real and the episode is not
-done there, 0 if it's padding or a post-EOS step). The `nonterm` factor is how you
-handle variable-length sequences in a batched loop.
+The `nonterm[t+1]` factor is how we handle variable-length sequences in a batched
+loop. It's 1 if position `t+1` is still part of the real episode, 0 if it's
+padding or beyond the end. When `nonterm = 0`, the bootstrap from the future is
+zeroed out.
 
 ### 5.4 Returns as value targets
 
-After computing advantages, compute the value regression target:
+After computing advantages, the value head needs a regression target. We use:
 
-$$
-R_t = A_t + V_t.
-$$
+    R_t = A_t + V_t
 
-This is the "bootstrapped Monte Carlo return" that's consistent with $A_t$: if $A_t$
-estimates the deviation from $V_t$ and $V_t$ estimates $\mathbb{E}[G_t]$, then
-$A_t + V_t$ estimates $G_t$ itself. The value head is trained to regress $V_t$ to
-$R_t$ (see `04-ppo-policy.md`).
+This is sometimes called the "bootstrapped Monte Carlo return". The reasoning: if
+`A_t` estimates "how much better the return was than we expected" and `V_t`
+estimates "what we expected", then their sum estimates the actual return.
 
-**Important:** $R_t$ is computed from $V_t$, but we treat $R_t$ as a
-**stop-gradient constant** inside the value loss. Otherwise the value head would be
-trying to make $V_t$ match something that depends on $V_t$ — a trivial and useless
-fixed point. In practice: detach the values before the GAE computation, or call GAE
-under `torch.no_grad()`. The `ppo_core.gae` function stays pure; the `train_ppo.py`
-driver is responsible for the no-grad context.
+**Important.** When training the value head, `R_t` is treated as a stop-gradient
+*constant*, even though we computed it from `V_t` just now. Otherwise the value
+head would be chasing its own tail — trying to make `V_t` match something that
+itself depends on `V_t`. Nothing would train.
 
-### 5.5 Unit test (from Problem 4.4)
+In practice: compute the advantages and returns under `torch.no_grad()` (or detach
+the values first). The `ppo_core.gae` function can stay pure; the `train_ppo.py`
+driver is responsible for wrapping it correctly.
 
-Hand-computed 3-step example: $T = 3$, `values = [0, 0, 0]`, `rewards = [1, 0, 0]`,
-`mask = [1, 1, 1]`, $\gamma = 1$, $\lambda = 1$.
+### 5.5 Unit test (Problem 4.4)
 
-- $\delta_2 = r_2 + \gamma V_3 - V_2 = 0 + 0 - 0 = 0$, $A_2 = 0$.
-- $\delta_1 = r_1 + \gamma V_2 - V_1 = 0 + 0 - 0 = 0$, $A_1 = 0 + 1 \cdot 0 = 0$.
-- $\delta_0 = r_0 + \gamma V_1 - V_0 = 1 + 0 - 0 = 1$, $A_0 = 1 + 1 \cdot 0 = 1$.
+Hand-computed 3-step example. Set `T = 3`, `values = [0, 0, 0]`,
+`rewards = [1, 0, 0]`, `mask = [1, 1, 1]`, `gamma = 1`, `lambda = 1`.
 
-So `advantages = [1, 0, 0]`, `returns = [1, 0, 0]`. This matches the comment in
-`ppo_core.gae`. Add a second test with a pad token in the middle — your implementation
-should treat the pad position's advantage as zero.
+Walking the recursion backwards:
+
+- `delta_2 = 0 + 0 - 0 = 0`, so `A_2 = 0`.
+- `delta_1 = 0 + 0 - 0 = 0`, so `A_1 = 0 + 1 * 0 = 0`.
+- `delta_0 = 1 + 0 - 0 = 1`, so `A_0 = 1 + 1 * 0 = 1`.
+
+Result: `advantages = [1, 0, 0]`, `returns = [1, 0, 0]`.
+
+Add a second test with a pad token in the middle — your implementation should
+handle the `nonterm` mask correctly, zeroing out the bootstrap at the pad
+position.
 
 ---
 
 ## 6. Per-token rewards for text
 
-In classical RL, $r_t$ is an environmental reward at each step. For text, we
-**construct** the per-token reward signal:
+In classical RL, the environment hands you a reward at every step. For text we
+have to *construct* the per-token reward ourselves:
 
-$$
-r_t = -\beta \cdot \text{KL}_t(\pi_\theta \| \pi_\text{ref}) + r_\text{RM}(y) \cdot \mathbf{1}_{t = T-1}.
-$$
+    r_t  =  - beta * KL_t(pi_theta || pi_ref)     +     r_RM(y) * (t == last_response_token)
 
-- A small **per-token KL penalty** that punishes the policy for moving too far from
-  the reference (SFT) model at every token.
-- A **terminal RM reward**, delivered as a single scalar at the last real token of the
-  response.
+Two pieces:
 
-See `04-ppo-kl.md` for why and what the $\text{KL}_t$ estimator looks like.
+- A small **per-token KL penalty** that punishes the policy for drifting from the
+  frozen reference (SFT) model at every step of the response.
+- A **terminal RM reward**, delivered as a single scalar at the last real token of
+  the response.
 
-Two consequences:
+See `04-ppo-kl.md` for the KL penalty details — why it's there, what estimator we
+use, and how it's computed.
 
-1. **The "reward" in GAE is not the RM score alone** — the KL penalty is baked in at
-   the per-token level, so the policy learns to trade off reward-seeking against
-   staying close to the SFT distribution *along the whole response*, not just at the end.
-2. **GAE propagates the terminal RM reward backward through the response.** $A_t$ at
-   an intermediate token reflects how much the terminal reward exceeded expectation,
-   minus the KL cost accumulated since. GAE's exponential weighting decides how much
-   credit each intermediate token gets.
+Two consequences worth understanding:
+
+1. **The per-token reward is not the RM score alone.** The KL penalty is baked in
+   at the per-token level, so the policy learns to trade off reward-seeking against
+   staying close to the SFT distribution *along the whole response*, not just at
+   the end.
+2. **GAE propagates the terminal RM reward backward through the response.** The
+   advantage at an intermediate token reflects how much the terminal reward
+   exceeded expectation, minus the KL cost accumulated since that point. GAE's
+   exponential weighting decides how much credit each intermediate token gets for
+   the final outcome.
 
 ---
 
 ## 7. Advantage normalization (Problem 4.8)
 
-Before feeding advantages into the PPO policy loss, normalize them across the *valid
-tokens* in the batch to zero mean and unit std:
+Before feeding advantages into the PPO policy loss, normalize them across valid
+tokens so they have mean 0 and std 1:
 
-$$
-\tilde A_t = \frac{A_t - \mu}{\sigma + \epsilon}, \qquad
-\mu = \frac{\sum_{b, t} m_{b, t} A_{b, t}}{\sum_{b, t} m_{b, t}}, \qquad
-\sigma^2 = \frac{\sum_{b, t} m_{b, t} (A_{b, t} - \mu)^2}{\sum_{b, t} m_{b, t}}.
-$$
+    mean = (sum over (b, t) of mask[b, t] * A[b, t])  /  sum(mask)
+    var  = (sum over (b, t) of mask[b, t] * (A[b, t] - mean)^2)  /  sum(mask)
+    A_tilde = (A - mean) / (sqrt(var) + epsilon)
 
-Why: keeps the effective learning rate scale-invariant to whatever absolute scale the
-RM is on. The PPO clip range $\varepsilon = 0.2$ assumes advantages of roughly unit
-scale; without normalization, a large-magnitude RM means every step hits the clip and
-no learning happens.
+Why? Because the PPO clip range (typically `epsilon = 0.2`) was chosen assuming
+advantages on roughly unit scale. If the RM happens to output rewards on the scale
+of 10 or 100, the advantages will be correspondingly huge, every step will hit the
+clip, and no learning happens. Normalizing makes the effective learning rate
+invariant to the absolute scale the RM happens to have learned.
 
-**Crucially** compute $\mu$ and $\sigma$ using only the mask's 1-positions. Pad tokens
-are garbage data — they must not pollute the stats. The test in Problem 4.8 inserts
-huge garbage values at masked positions and checks the normalized stats are unchanged.
+**The mask matters.** Compute the mean and variance only over the positions where
+the mask is 1 — the real response tokens. Padding tokens are garbage data, and if
+you let them into the stats, they'll pollute the normalization. The unit test in
+Problem 4.8 inserts huge garbage values at masked positions and asserts that the
+normalized output's mean and std are unchanged.
 
 ---
 
 ## 8. What to commit to `notes/04-ppo-gae.md`
 
-After finishing Problem 4.4 and 4.8, append:
+After finishing Problems 4.4 and 4.8, add:
 
-- Your own derivation of the GAE recursion (the 5.2 step).
+- Your own derivation of the GAE recursion (section 5.2 above, redone by hand).
 - The numeric output of your unit tests, including the pad-in-the-middle case.
-- A one-line explanation of what $\lambda$ does (you should be able to say this cold).
+- A one-line explanation of what `lambda` does. You should be able to say this
+  without any hesitation.

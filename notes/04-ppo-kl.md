@@ -2,227 +2,224 @@
 
 ## Purpose
 
-Theory for Problems 4.2 and 4.3 (per-token KL and reward shaping). Short file, but the
-KL term is the single biggest source of "wait, why is this training unstable" problems
-in PPO for text. Read carefully.
+Theory packet for Problems 4.2 and 4.3 (per-token KL and reward shaping). Short note,
+but the KL term is the single biggest cause of "why is PPO unstable?" problems on
+text. Read carefully.
 
 By the end you should be able to:
 
-1. Explain why we want a KL penalty at all.
-2. Derive three estimators of $\text{KL}(\pi \| \pi_\text{ref})$ from a single sample:
-   $k_1$, $k_2$, $k_3$.
-3. Explain which to use for the penalty and which for logging, and why.
+1. Say why the KL penalty is there at all.
+2. Derive three single-sample estimators of KL divergence (`k_1`, `k_2`, `k_3`).
+3. Explain which estimator we use for the reward penalty, which we use for logging,
+   and why.
 4. Write down the per-token reward shaping used in InstructGPT-style PPO.
 
 ---
 
 ## 1. Why a KL penalty?
 
-The reward model $r_\phi$ is an imperfect proxy for human preferences. If we optimize it
-naively with a powerful policy, the policy will find *adversarial high-reward outputs*
-the RM assigns reward to but humans don't actually like — sycophancy, fake confidence,
-specific phrasing fingerprints. This is **reward hacking**.
+The reward model is an imperfect proxy for human judgment. If we optimize it
+naively with a strong policy, the policy will find *adversarial high-reward
+outputs* — text the RM scores high but humans actually dislike. Think sycophantic
+phrasing, confident-sounding nonsense, or specific fingerprints the RM happens to
+love. This failure mode is called **reward hacking**.
 
-Remedy: penalize the policy for moving too far from its starting point (the SFT model),
-measured in KL divergence token-by-token:
+The fix: penalize the policy for wandering too far from where it started (the SFT
+model), measured in KL divergence. The RL objective becomes:
 
-$$
-J_\text{RLHF}(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\!\left[ r_\phi(\tau) - \beta \sum_t \text{KL}\bigl(\pi_\theta(\cdot \mid s_t) \,\|\, \pi_\text{ref}(\cdot \mid s_t)\bigr)\right].
-$$
+    J_RLHF(theta) = E [ r_RM(trajectory) - beta * sum over t of KL( pi_theta(. | s_t) || pi_ref(. | s_t) ) ]
 
-$\beta$ controls how conservative the policy stays. Small $\beta$ = free to explore,
-big reward-hacking risk. Large $\beta$ = stays close to SFT, smaller reward gains.
+`beta` controls the strength of the penalty:
 
-Two interpretations of this penalty, both valid and important:
+- Small `beta`: policy is free to explore, but reward-hacking risk is high.
+- Large `beta`: policy stays close to SFT, but reward gains will be small.
 
-- **Trust region.** $\beta$ implements a soft trust region keeping $\pi_\theta$ in a
-  neighborhood of $\pi_\text{ref}$ where the RM's judgments are more likely to be
-  accurate (because that's where the RM was trained).
-- **Regularization.** The SFT policy is the prior; we're doing
+Two different ways to understand this penalty, both true:
+
+- **Trust region.** `beta` implements a soft trust region that keeps `pi_theta`
+  in a neighborhood of `pi_ref`, where the RM's judgments are more likely to be
+  reliable (because that's where the RM was trained).
+- **Regularization toward a prior.** The SFT policy is our prior. We're doing
   reward-maximization-with-a-prior rather than pure reward-maximization. You can
-  view PPO-with-KL-penalty as roughly the posterior under this prior.
+  view the PPO-with-KL objective as approximating the posterior under that prior.
 
-$\pi_\text{ref}$ is **frozen** (a copy of `sft.pt`). It does not get updated during PPO.
-
----
-
-## 2. Why a per-token KL at all (not episode-level)?
-
-We *could* compute a single full-sequence KL per episode and add it as one more scalar
-reward at the end. InstructGPT chose to distribute the KL penalty per-token instead:
-
-$$
-r_t = -\beta \cdot \text{KL}_t + r_\text{RM} \cdot \mathbf{1}_{t = T-1}.
-$$
-
-Advantages of per-token:
-
-- **Credit assignment.** Any individual token that drives up KL gets penalized at that
-  position, and GAE carries the signal backward only as far as reasonable. With an
-  episode-level penalty, every token in the sequence shares the blame equally.
-- **Numerical scale.** An episode-level KL is the sum of per-token KLs; over 256 tokens
-  that's a much larger scalar and makes tuning $\beta$ harder.
+`pi_ref` is a **frozen copy of `sft.pt`**. It never gets updated during PPO.
 
 ---
 
-## 3. The three KL estimators
+## 2. Why *per-token* KL, not per-episode?
 
-We have $\log \pi_\theta(a_t \mid s_t)$ (the "new" log-prob) and
-$\log \pi_\text{ref}(a_t \mid s_t)$ (the frozen ref's log-prob), both evaluated on the
-*sample* $a_t$ drawn from $\pi_\theta$ during rollout. We want an estimate of
+Option A: compute a single KL per episode and tack it onto the final reward.
+Option B: distribute the KL penalty across tokens, one per step.
 
-$$
-\text{KL}\bigl(\pi_\theta(\cdot \mid s_t)\,\|\,\pi_\text{ref}(\cdot \mid s_t)\bigr)
-= \mathbb{E}_{a \sim \pi_\theta}\!\left[\log \frac{\pi_\theta(a)}{\pi_\text{ref}(a)}\right]
-$$
+InstructGPT picks option B. The per-token reward becomes:
 
-from the single sample $a_t$ we actually drew.
+    r_t = -beta * KL_t + r_RM * (t == last_response_token)
 
-Define the log-ratio
+Two reasons this is better:
 
-$$
-L_t = \log \pi_\theta(a_t \mid s_t) - \log \pi_\text{ref}(a_t \mid s_t), \qquad
-\rho_t = e^{L_t}.
-$$
+- **Credit assignment.** If one specific token drives up the KL, it gets punished
+  at that position. GAE then propagates the penalty only as far backward as
+  reasonable. With an episode-level penalty, every token shares the blame
+  equally, which washes out the signal.
+- **Numerical scale.** Per-episode KL is the sum of per-token KLs. Over 256
+  tokens that's a much bigger scalar and makes `beta` much harder to tune.
 
-### 3.1 $k_1$: naive log-ratio
+---
 
-$$
-k_1(a_t) = L_t.
-$$
+## 3. Three KL estimators
 
-- **Unbiased** estimator of the KL:
-  $\mathbb{E}_{a \sim \pi_\theta}[L] = \text{KL}(\pi_\theta \| \pi_\text{ref})$ by definition.
-- Can be **negative** on a single sample (e.g. if the draw happens to be more likely
-  under $\pi_\text{ref}$ than $\pi_\theta$).
-- **High variance** — this is the "raw" estimator with nothing to reduce noise.
+Here's the setup. During rollout, we generated a sequence of tokens from
+`pi_theta`. For each generated token `a_t`, we have two numbers:
 
-This is what InstructGPT uses as the shaping penalty in the per-token reward.
+- `log pi_theta(a_t | s_t)`: the log-probability the current policy assigned.
+- `log pi_ref(a_t | s_t)`: the log-probability the frozen reference assigned.
 
-### 3.2 $k_2$: half-squared
+We want to estimate the KL divergence between the two policies *at that state*,
+defined as:
 
-$$
-k_2(a_t) = \tfrac{1}{2} L_t^2.
-$$
+    KL( pi_theta(. | s_t) || pi_ref(. | s_t) )
+      = E_{a ~ pi_theta} [ log pi_theta(a | s_t) - log pi_ref(a | s_t) ]
 
-- Always $\ge 0$.
-- **Biased**: $\mathbb{E}[k_2] \ne \text{KL}$ in general. It's a biased estimate of a
-  related but different quantity (it's actually an unbiased estimate of
-  $\tfrac{1}{2}\mathbb{E}[L^2]$, which by Jensen's is an upper bound on
-  $\tfrac{1}{2}(\mathbb{E} L)^2$ but not equal to $\text{KL}$).
-- Rarely used in modern RLHF. Included for completeness.
+But we don't have access to the full distribution or an exact expectation. We have
+exactly one sample `a_t` drawn from `pi_theta`. What's our best single-sample
+estimate?
 
-### 3.3 $k_3$: Schulman's unbiased-nonnegative
+Define the log-ratio for the token we drew:
 
-$$
-k_3(a_t) = \bigl(\rho_t - 1\bigr) - L_t = e^{L_t} - 1 - L_t.
-$$
+    L_t  =  log pi_theta(a_t | s_t) - log pi_ref(a_t | s_t)
+    rho_t = exp(L_t)
 
-- **Always $\ge 0$.** Because $e^x - 1 - x \ge 0$ for all real $x$, with equality only
-  at $x = 0$.
-- **Unbiased** estimator of $\text{KL}$.
+Three standard estimators, `k_1`, `k_2`, `k_3`:
 
-  Sketch: $\mathbb{E}_{a \sim \pi_\theta}[\rho - 1] = \mathbb{E}[\pi_\text{ref}(a)/\pi_\theta(a) \cdot \pi_\theta(a)/\pi_\text{ref}(a)]$ — wait, let's redo carefully.
+### 3.1 `k_1`: the naive log-ratio
 
-  $\rho = \pi_\theta / \pi_\text{ref}$, so
-  $\mathbb{E}_{\pi_\theta}[\rho - 1] = \mathbb{E}_{\pi_\theta}[\pi_\theta/\pi_\text{ref}] - 1$.
-  That second expectation is not 1 in general — it's
-  $\sum_a \pi_\theta^2(a) / \pi_\text{ref}(a) \ge 1$. So $\mathbb{E}[\rho - 1] \ge 0$
-  but isn't zero.
+    k_1 = L_t
 
-  However, $\mathbb{E}[k_3] = \mathbb{E}[\rho - 1] - \mathbb{E}[L] = (\text{something} \ge 0) - \text{KL}$.
+- **Unbiased**: `E[L_t]` under `pi_theta` is literally the KL, by definition. Good.
+- Can go **negative** on a single sample. If we happen to draw a token that the
+  reference thinks is more likely than the current policy does, `L_t < 0`. That's
+  weird-looking for a "divergence" but mathematically fine.
+- **High variance.** Single-sample estimator with no variance reduction.
 
-  The precise statement (Schulman 2020, "Approximating KL Divergence") is that $k_3$
-  is an unbiased estimator of a particular quantity that coincides with
-  $\text{KL}$ when one integrates properly — in practice $k_3$ is treated as "unbiased
-  for all intents and purposes" because it matches the true KL in expectation under
-  the regime we care about (moderate $\rho$). It's the standard estimator for logging.
+This is what InstructGPT uses as the shaping penalty in the per-token reward. It's
+exactly what we use in `shape_reward`.
 
-- **Lower variance than $k_1$** in practice, because the negative samples in $k_1$
-  get offset by the positive $\rho - 1 - L$ adjustment.
+### 3.2 `k_2`: half-squared log-ratio
 
-A clean intuition: $k_1$ is "the log-ratio of the sample I drew". $k_3$ adjusts that
-by how much $\rho$ departs from 1 *linearly* — penalizing both upside and downside
-deviations symmetrically.
+    k_2 = 0.5 * L_t^2
 
-### 3.4 Which to use for what
+- Always non-negative. Nice.
+- **Biased.** It's actually an unbiased estimate of `0.5 * E[L^2]`, which by
+  Jensen's inequality is an upper bound on `0.5 * (E[L])^2` but is *not* equal to
+  KL in general.
+- Rarely used in modern RLHF. Included here for completeness.
 
-- **Penalty in the per-token reward (shaping):** $k_1$.
-  - Pros: unbiased, simple gradient (derivative of $L_t$ w.r.t. $\log \pi_\theta$ is
-    just $1$), matches InstructGPT exactly.
-  - Cons: can go negative on a single sample, gives a noisy reward signal.
-- **Logging / diagnostics:** $k_3$.
-  - Pros: nonnegative, interpretable as "how far has the policy moved from ref".
-  - Cons: gradient is $\rho_t$ (nonlinear), complicates things if used as penalty.
+### 3.3 `k_3`: Schulman's unbiased-and-nonnegative
 
-In this repo: `kl_k1` is the shaping penalty used inside `shape_reward`; `kl_k3` is
-just for the CSV log.
+    k_3 = (rho_t - 1) - L_t
+        = exp(L_t) - 1 - L_t
+
+- Always **non-negative**, because `exp(x) - 1 - x >= 0` for all real `x` (the
+  exponential function lies above its tangent at 0). Equality only when `x = 0`.
+- **Unbiased** (with a caveat).
+- **Lower variance than `k_1`** in practice: when `k_1` has a big-magnitude
+  negative sample, `k_3` pulls it back up via the `rho - 1` term, and vice versa.
+
+A quick geometric picture: `k_1` is just the raw log-ratio of whatever token you
+happened to draw. `k_3` adds a symmetric correction penalizing any deviation of
+`rho` from 1 — both upside and downside.
+
+### 3.4 Which do we use for what?
+
+- **Penalty inside the per-token reward (shaping):** `k_1`.
+  - It's unbiased, its gradient with respect to `log pi_theta` is just `1`
+    (simple), and it matches InstructGPT exactly.
+  - Downside: single samples can be negative, so the per-token reward signal is
+    noisy. But GAE helps smooth that out.
+- **Logging and diagnostics:** `k_3`.
+  - Non-negative, so it plots as an interpretable "how far has the policy moved
+    from ref" number.
+  - Downside: its gradient is `rho`, which is nonlinear — makes it a pain if you
+    try to use it *as* the penalty.
+
+In this repo: `kl_k1` goes into `shape_reward`; `kl_k3` is computed for the CSV
+log but not used in gradients.
 
 ---
 
 ## 4. Reward shaping (Problem 4.3)
 
-Put it all together. Given a batch of rollouts:
+Putting it all together. After a rollout we have:
 
-- `rm_reward[b]` — scalar reward from the RM at the last non-pad response token.
-- `logprobs_old[b, t]` — per-token log-prob under $\pi_\theta$ at rollout time.
-- `ref_logprobs[b, t]` — per-token log-prob under $\pi_\text{ref}$.
-- `response_mask[b, t]` — 1 on real response tokens.
+- `rm_reward[b]`: the RM's scalar output at the last real response token,
+  shape `(B,)`.
+- `logprobs_old[b, t]`: per-token log-prob under `pi_theta` at rollout time,
+  shape `(B, T_resp)`.
+- `ref_logprobs[b, t]`: per-token log-prob under `pi_ref`, same shape.
+- `response_mask[b, t]`: 1 on real response tokens, 0 on padding / post-EOS.
 
-Compute:
+Compute the per-token KL:
 
-$$
-\text{KL}^{k_1}_{b, t} = \log \pi_\theta(a_{b, t} \mid s_{b, t}) - \log \pi_\text{ref}(a_{b, t} \mid s_{b, t}),
-$$
+    KL_k1[b, t] = logprobs_old[b, t] - ref_logprobs[b, t]
 
-$$
-r_{b, t} = -\beta \cdot \text{KL}^{k_1}_{b, t} \cdot m_{b, t} \; + \; r_\text{RM}[b] \cdot \mathbf{1}_{t = \text{last}(b)}.
-$$
+And the per-token reward:
 
-The $\mathbf{1}_{t = \text{last}(b)}$ is the indicator that $t$ is the last real token
-of row $b$'s response — this is where the terminal RM reward gets injected.
+    r[b, t] = -beta * KL_k1[b, t] * response_mask[b, t]
+              + rm_reward[b] * (t == last_response_token_of_row_b)
 
-### Edge cases
+The indicator `(t == last_response_token_of_row_b)` is 1 exactly once per row —
+at the last real token of that row's response. That's where the terminal RM
+reward gets injected.
 
-- If an episode finished early via `<|im_end|>`, `last(b)` is that EOS position. After
-  that, `response_mask` is 0 and so is every term in the reward.
-- If the policy hit `response_max_len` without EOSing, `last(b)` is the last position
-  (still mask = 1). The RM scores whatever got generated, including the truncation.
-- With $\beta \to 0$ the KL shaping vanishes and you get pure RM terminal reward.
-  Verify this edge case in the unit test.
+### Edge cases to verify
+
+- If a row ended early via `<|im_end|>`, that EOS position is the "last real
+  token" for that row. After that, `response_mask` is 0, so every term in the
+  reward is 0.
+- If a row hit `response_max_len` without producing `<|im_end|>`, the last real
+  token is just the final position. The RM scores whatever got generated,
+  including the truncation.
+- When `beta = 0`, the KL shaping vanishes and you should get pure terminal RM
+  reward. Make this an explicit unit test.
 
 ---
 
-## 5. Adaptive KL (optional, not required)
+## 5. Adaptive KL (optional)
 
-InstructGPT actually uses an **adaptive** $\beta$: start from a target KL budget (e.g.
-6 nats over 256 tokens), and after each PPO iteration adjust $\beta$ multiplicatively
-based on whether the measured KL exceeded or fell short of the target. We default
-to a **fixed** $\beta = 0.02$ in this repo because it's simpler and good enough for
-a teaching impl. Adaptive KL is a good 30-minute extension once everything else works.
+InstructGPT actually uses an *adaptive* `beta`: it targets a specific KL budget
+(e.g. 6 nats total over 256 tokens) and adjusts `beta` multiplicatively after each
+iteration based on whether the measured KL overshot or undershot that target.
+
+We default to a **fixed** `beta = 0.02` in this repo because it's simpler and good
+enough for a teaching implementation. Adaptive KL is a nice 30-minute extension
+once everything else is working — not required.
 
 ---
 
 ## 6. Common pitfalls
 
-- **Per-token KL computed on positions that didn't exist.** Pad positions, post-EOS
-  positions. Multiply $\text{KL}_t$ by `response_mask[b, t]` before using it as
-  reward.
-- **Ref log-probs recomputed with dropout on.** Ref is frozen — call with
-  `model.eval()` and wrap in `torch.no_grad()`. Numerical differences here propagate
-  directly into the shaping penalty and will make training noisy.
-- **$\beta$ too small.** Reward goes up, KL explodes, responses get weird — classic
-  reward hacking. Bump $\beta$.
-- **$\beta$ too large.** Reward barely moves, entropy collapses, responses look like
-  SFT with minor variations. Lower $\beta$.
+- **KL computed on positions that aren't real.** Padding, or positions after EOS,
+  contribute to the mean if you don't mask. Always multiply `KL_t` by the
+  response mask before using it.
+- **Ref log-probs recomputed with dropout on.** The reference is supposed to be
+  deterministic and frozen. If you forget to call `model.eval()` or use
+  `torch.no_grad()`, you'll get noisy ref log-probs, which feed directly into the
+  KL penalty and make training jittery.
+- **`beta` too small.** Reward climbs, KL explodes faster, responses get weird.
+  Classic reward hacking — raise `beta`.
+- **`beta` too large.** Reward barely moves, entropy collapses, responses look
+  like SFT with minor cosmetic differences. Lower `beta`.
 
 ---
 
 ## 7. What to commit to `notes/04-ppo-kl.md`
 
-After finishing Problems 4.2 and 4.3, append:
+After finishing Problems 4.2 and 4.3, add:
 
-- Your derivation that $e^x - 1 - x \ge 0$ for all $x$ (easy: convexity argument).
-- A small experiment: compute $k_1$ and $k_3$ on synthetic log-prob samples from two
-  fixed discrete distributions, compare against the true (analytically computed) KL,
-  and observe that both are unbiased but $k_1$ has more variance.
+- Your own derivation that `exp(x) - 1 - x >= 0` for all `x`. Easy one-liner from
+  convexity: `exp(x)` lies above its tangent at `x = 0`.
+- A small experiment: pick two fixed discrete distributions, compute their *exact*
+  KL analytically, then sample from one and estimate the KL using both `k_1` and
+  `k_3`. Verify that both are approximately unbiased and that `k_1` has clearly
+  higher variance. This is the cleanest way to internalize the difference.
