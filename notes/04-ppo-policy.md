@@ -25,6 +25,22 @@ By the end you should be able to:
 
 ## 1. Setup: importance-sampled policy gradient
 
+Before the equations, a plain-English sketch of PPO's one idea. Vanilla policy
+gradient says: sample a trajectory from the current policy, and nudge the
+parameters so the good actions become more likely. Two problems:
+
+1. Sampling trajectories is expensive — each one requires a full autoregressive
+   generation of up to 256 tokens. We'd rather reuse each batch of samples for
+   several gradient steps.
+2. Once we've taken a step, the old samples aren't drawn from the new policy
+   anymore, so the naive gradient is biased.
+
+PPO fixes both with a two-step trick: (a) use importance sampling to reuse the
+batch for multiple gradient updates, and (b) *clip* the importance ratio so that
+after a few updates the policy can't wander far enough from the rollout policy
+to make the estimator blow up. The rest of this note is just making that trick
+precise.
+
 Recall from `04-ppo-gae.md` that the policy gradient with advantage baseline is:
 
 $$
@@ -119,6 +135,27 @@ objective (before the negation), we take the *minimum* of `surr1` and `surr2`,
 i.e. the less favorable one. This is the key idea — the surrogate is set up so
 that the policy cannot be rewarded for running the ratio far outside
 `[1 - eps, 1 + eps]` in the direction of increasing the objective.
+
+A quick sanity check with numbers. Set $\varepsilon = 0.2$ so the clip range is
+$[0.8,\, 1.2]$. Pick two tokens:
+
+- **Token A (good action).** Advantage $A = +1$ (this action turned out better
+  than expected). Current ratio $\rho = 1.5$ — the policy has moved so that this
+  token is 1.5x more likely than it was at rollout. Compute:
+  $\mathrm{surr}_1 = 1.5$, $\mathrm{surr}_2 = 1.2$. $\min = 1.2$. Loss
+  $= -1.2$. The gradient is **zero** because the flat clipped branch won the
+  $\min$ — no further pushing this token upward; it's already moved too far.
+- **Token B (bad action).** Advantage $A = -1$. Ratio $\rho = 1.5$. Compute:
+  $\mathrm{surr}_1 = -1.5$, $\mathrm{surr}_2 = -1.2$. $\min = -1.5$. Loss
+  $= +1.5$. The gradient is **non-zero** and it pushes $\rho$ down — which is
+  what we want, because this action turned out badly and we want to make it
+  less likely. The clip does NOT fire here, because firing it would soften our
+  response to a bad action we want to suppress.
+
+That asymmetry is the whole point: we are only "pessimistic" (clip to avoid big
+moves) when the policy would otherwise enjoy a reward for a move that has already
+gotten extreme. If the move is extreme in a *costly* direction, we let the
+gradient keep flowing.
 
 ### 2.2 What "pessimistic" means, case by case
 

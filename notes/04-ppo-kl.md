@@ -16,6 +16,64 @@ By the end you should be able to:
 
 ---
 
+## 0. A five-minute KL divergence primer
+
+Before we use KL divergence, we should know what it is. If you already do, skim
+this and keep going.
+
+KL divergence is a number that measures **how different two probability
+distributions are**, from the point of view of one of them. For two distributions
+$P$ and $Q$ over the same set of outcomes, the KL divergence from $P$ to $Q$ is:
+
+$$
+\mathrm{KL}(P \| Q) = \sum_x P(x) \cdot \log \frac{P(x)}{Q(x)}
+$$
+
+Or in code-style:
+
+    KL(P || Q) = sum over x of P(x) * log( P(x) / Q(x) )
+
+Five facts to internalize:
+
+1. **It is always non-negative.** $\mathrm{KL}(P \| Q) \ge 0$, with equality iff
+   $P = Q$ everywhere. (This follows from Jensen's inequality applied to the
+   concave function $\log$.)
+2. **It is not symmetric.** $\mathrm{KL}(P \| Q) \ne \mathrm{KL}(Q \| P)$ in
+   general. Despite the name "divergence", it is not a proper distance.
+3. **Units are nats**, because we used natural log. Multiply by
+   $1/\ln 2 \approx 1.44$ to convert to bits.
+4. **It's an expectation under $P$.** $\sum_x P(x) \log(P(x)/Q(x))$ can be read
+   as $\mathbb{E}_{x \sim P}[\log(P(x)/Q(x))]$ — the average log-ratio, averaged
+   over samples drawn from $P$. This is important because PPO only has samples
+   from one distribution.
+5. **It equals zero iff the two distributions agree everywhere.** The smallest
+   disagreement gives a strictly positive number.
+
+A tiny worked example. Say the vocabulary has three outcomes. Policy $\pi$ thinks
+the probabilities are $(0.5,\, 0.3,\, 0.2)$. Reference $\pi_{\mathrm{ref}}$ thinks
+$(0.4,\, 0.4,\, 0.2)$. Plug in:
+
+$$
+\mathrm{KL}(\pi \| \pi_{\mathrm{ref}})
+= 0.5 \log\tfrac{0.5}{0.4} + 0.3 \log\tfrac{0.3}{0.4} + 0.2 \log\tfrac{0.2}{0.2}
+\approx 0.5(0.223) + 0.3(-0.288) + 0.2(0)
+\approx 0.025 \text{ nats}
+$$
+
+Very small. The two distributions are nearly identical. KL grows fast as
+distributions pull apart: if $\pi_{\mathrm{ref}}$ put zero probability on some
+outcome that $\pi$ puts positive probability on, the log-ratio would blow up and
+KL would be infinite. That's why we can't start PPO from random weights; the
+KL penalty would be meaningless.
+
+Intuition for why KL shows up in RLHF: the SFT policy $\pi_{\mathrm{ref}}$ is our
+"sane, coherent English" distribution. Any movement of $\pi_\theta$ away from it
+is reported as a KL number, and we can put a price on that movement. The
+optimization then decides, at every token, whether chasing extra reward is worth
+the KL cost.
+
+---
+
 ## 1. Why a KL penalty?
 
 The reward model is an imperfect proxy for human judgment. If we optimize it

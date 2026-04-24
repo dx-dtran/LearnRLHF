@@ -271,7 +271,45 @@ water from every bucket in proportion to how full it is, then dump an equal tota
 amount into bucket $y$." After many steps, bucket $y$ is full and everything else
 is nearly empty — which is exactly what confident, correct prediction looks like.
 
-### 4.4 With the mask
+### 4.4 A worked example with numbers
+
+Let's make this concrete. Pretend our vocabulary has only 3 tokens, call them
+"cat", "dog", "fish" (indices 0, 1, 2). The true next token is "dog" (so $y = 1$).
+Suppose the model's raw logits are $z = (1.0,\, 2.0,\, 0.5)$.
+
+Step 1: softmax. Exponentiate each entry and divide by the sum:
+
+- $\exp(1.0) \approx 2.72$
+- $\exp(2.0) \approx 7.39$
+- $\exp(0.5) \approx 1.65$
+- Sum $\approx 11.76$
+- $p \approx (0.231,\, 0.628,\, 0.140)$
+
+So the model already thinks "dog" is most likely (62.8%), but it's not fully
+confident.
+
+Step 2: the loss. $\ell = -\log p_y = -\log(0.628) \approx 0.465$.
+
+Step 3: the gradient. Use the formula $\partial \ell / \partial z = p - e_y$,
+where $e_y = (0, 1, 0)$ is the one-hot vector at index 1:
+
+- $\partial \ell / \partial z_0 = 0.231 - 0 = +0.231$
+- $\partial \ell / \partial z_1 = 0.628 - 1 = -0.372$
+- $\partial \ell / \partial z_2 = 0.140 - 0 = +0.140$
+
+A gradient descent step moves $z$ in the *opposite* direction of the gradient (with
+some learning rate $\eta$), so after one step with $\eta = 1.0$:
+
+- $z_0 \leftarrow 1.0 - 0.231 = 0.769$ (cat logit went down — good, cat is wrong)
+- $z_1 \leftarrow 2.0 - (-0.372) = 2.372$ (dog logit went up — good, dog is right)
+- $z_2 \leftarrow 0.5 - 0.140 = 0.360$ (fish logit went down — good, fish is wrong)
+
+Recompute softmax with the new logits: $p \approx (0.154,\, 0.751,\, 0.095)$. The
+model is now 75% sure about "dog", up from 63%. One gradient step moved us in the
+right direction, and the gradient told us *exactly how much* to move each logit.
+Do this for 100 million tokens and you've got a trained language model.
+
+### 4.5 With the mask
 
 Across positions `t`, with the mask factored in:
 

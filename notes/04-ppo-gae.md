@@ -45,6 +45,33 @@ $\gamma$ is a discount factor in $[0, 1]$. For text RL we use $\gamma = 1$ — e
 are short, and we want credit assignment to flow across the entire response without
 the exponential dampening that $\gamma < 1$ would give.
 
+### 1.1 A concrete rollout
+
+If this is your first time meeting RL, the abstractions above can feel slippery.
+Make it concrete. Suppose the prompt is:
+
+    s_0 = "<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n"
+
+The model generates, one token at a time:
+
+| $t$ | State $s_t$                                    | Action $a_t$ (sampled) | Reward $r_t$            |
+|-----|------------------------------------------------|------------------------|-------------------------|
+| 0   | prompt                                         | `"The"`                | small KL penalty only   |
+| 1   | prompt + `"The"`                               | `" answer"`            | small KL penalty only   |
+| 2   | prompt + `"The answer"`                        | `" is"`                | small KL penalty only   |
+| 3   | prompt + `"The answer is"`                     | `" 4"`                 | small KL penalty only   |
+| 4   | prompt + `"The answer is 4"`                   | `"."`                  | small KL penalty only   |
+| 5   | prompt + `"The answer is 4."`                  | `<|im_end|>`           | KL penalty + RM reward  |
+
+Each "state" is the entire token sequence so far. Each "action" is the next
+token the policy samples. Each "reward" is a scalar we compute per token — most
+are just tiny KL penalties, but the last one also carries the big terminal reward
+from the RM (its scalar opinion of the whole response).
+
+That's one rollout. An iteration of PPO generates a batch of many such rollouts
+in parallel. Every quantity in the rest of this note is defined on these
+per-token tuples $(s_t, a_t, r_t)$.
+
 ---
 
 ## 2. The policy gradient theorem
@@ -96,13 +123,20 @@ $$
 Only the policy factors depend on $\theta$. The initial state distribution and the
 transition dynamics are "the environment" and we don't control them.
 
-**Step 3.** The **log-derivative trick**. For any function $f(\theta)$:
+**Step 3.** The **log-derivative trick**. For any positive function $f(\theta)$:
 
 $$
 \nabla_\theta f = f \cdot \nabla_\theta \log f
 $$
 
-(just rearrange $\nabla \log f = \nabla f / f$). Apply this to $p_\theta(\tau)$:
+This is just the chain rule for $\log$: $\nabla_\theta \log f = (1/f) \cdot
+\nabla_\theta f$, so multiply both sides by $f$. The reason we use this trick:
+we want gradients to appear as expectations (sums of $f \cdot \text{something}$)
+so we can estimate them by averaging over samples. The log-derivative trick is
+the standard move for converting "gradient of a probability" into "probability
+times gradient of log-probability".
+
+Apply it to $p_\theta(\tau)$:
 
 $$
 \nabla_\theta p_\theta(\tau) = p_\theta(\tau) \cdot \nabla_\theta \log p_\theta(\tau)
