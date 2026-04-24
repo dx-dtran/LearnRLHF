@@ -63,7 +63,7 @@ At each position `t`, the model outputs a logit vector $z_t$ of length `V` (voca
 size). Softmax converts logits to a probability distribution over the vocabulary:
 
 $$
-p_{t,v} \;=\; \frac{\exp(z_{t,v})}{\sum_{v'} \exp(z_{t,v'})}
+p_{t,v} = \frac{\exp(z_{t,v})}{\sum_{v'} \exp(z_{t,v'})}
 $$
 
 Or in code-style:
@@ -80,7 +80,7 @@ The cross-entropy loss at position `t` is the negative log-probability the model
 assigns to the true next token $y_t = \text{labels}[t]$:
 
 $$
-\ell_t \;=\; -\log p_{t,y_t} \;=\; -z_{t,y_t} \;+\; \log \sum_{v'} \exp(z_{t,v'})
+\ell_t = -\log p_{t,y_t} = -z_{t,y_t} + \log \sum_{v'} \exp(z_{t,v'})
 $$
 
 Or in code-style:
@@ -103,9 +103,9 @@ want it to produce.
 Summing across a batch of examples, indexed by `(b, t)`:
 
 $$
-L_{\mathrm{SFT}} \;=\; \frac{1}{N_{\mathrm{resp}}} \sum_{b, t} m_{b,t} \cdot \ell_{b,t},
+L_{\mathrm{SFT}} = \frac{1}{N_{\mathrm{resp}}} \sum_{b, t} m_{b,t} \cdot \ell_{b,t},
 \qquad
-N_{\mathrm{resp}} \;=\; \sum_{b, t} m_{b,t}
+N_{\mathrm{resp}} = \sum_{b, t} m_{b,t}
 $$
 
 Or in code-style:
@@ -172,7 +172,7 @@ the softmax of $z$. Let $y$ be the index of the correct class. The loss at this
 position is:
 
 $$
-\ell \;=\; -\log p_y
+\ell = -\log p_y
 $$
 
 We want $\partial \ell / \partial z$ — the gradient of the loss with respect to the
@@ -185,7 +185,7 @@ probability changes with the logit.
 For any two indices $v$ and $u$ we have:
 
 $$
-\frac{\partial p_v}{\partial z_u} \;=\; p_v \cdot (\delta_{v,u} \,-\, p_u)
+\frac{\partial p_v}{\partial z_u} = p_v \cdot (\delta_{v,u} - p_u)
 $$
 
 where $\delta_{v,u}$ is the Kronecker delta (reads: "1 if the subscripts are equal,
@@ -198,7 +198,7 @@ $S = \sum_{v'} \exp(z_{v'})$, and use the quotient rule:
 
 $$
 \frac{\partial p_v}{\partial z_u}
-\;=\; \frac{(\partial \exp(z_v)/\partial z_u) \cdot S \,-\, \exp(z_v) \cdot (\partial S/\partial z_u)}{S^2}
+ = \frac{(\partial \exp(z_v)/\partial z_u) \cdot S - \exp(z_v) \cdot (\partial S/\partial z_u)}{S^2}
 $$
 
 The first derivative in the numerator is $\exp(z_v) \cdot \delta_{v,u}$ (since
@@ -207,9 +207,9 @@ $\partial S/\partial z_u = \exp(z_u)$. Plug in and collect terms:
 
 $$
 \frac{\partial p_v}{\partial z_u}
-\;=\; \frac{\exp(z_v)}{S} \delta_{v,u} \;-\; \frac{\exp(z_v)}{S} \cdot \frac{\exp(z_u)}{S}
-\;=\; p_v \delta_{v,u} \;-\; p_v p_u
-\;=\; p_v (\delta_{v,u} - p_u)
+ = \frac{\exp(z_v)}{S} \delta_{v,u} - \frac{\exp(z_v)}{S} \cdot \frac{\exp(z_u)}{S}
+ = p_v \delta_{v,u} - p_v p_u
+ = p_v (\delta_{v,u} - p_u)
 $$
 
 Done. This result is worth memorizing — it shows up every time you differentiate a
@@ -222,34 +222,34 @@ $z_u$":
 
 $$
 \frac{\partial \ell}{\partial z_u}
-\;=\; \frac{\partial \ell}{\partial p_y} \cdot \frac{\partial p_y}{\partial z_u}
+ = \frac{\partial \ell}{\partial p_y} \cdot \frac{\partial p_y}{\partial z_u}
 $$
 
 The first factor comes from $\ell = -\log p_y$:
 
 $$
-\frac{\partial \ell}{\partial p_y} \;=\; -\frac{1}{p_y}
+\frac{\partial \ell}{\partial p_y} = -\frac{1}{p_y}
 $$
 
 The second factor we just computed (plug $v = y$):
 
 $$
-\frac{\partial p_y}{\partial z_u} \;=\; p_y (\delta_{y,u} - p_u)
+\frac{\partial p_y}{\partial z_u} = p_y (\delta_{y,u} - p_u)
 $$
 
 Multiply them:
 
 $$
 \frac{\partial \ell}{\partial z_u}
-\;=\; -\frac{1}{p_y} \cdot p_y (\delta_{y,u} - p_u)
-\;=\; -(\delta_{y,u} - p_u)
-\;=\; p_u - \delta_{y,u}
+ = -\frac{1}{p_y} \cdot p_y (\delta_{y,u} - p_u)
+ = -(\delta_{y,u} - p_u)
+ = p_u - \delta_{y,u}
 $$
 
 The $p_y$ cancels beautifully. In vector form:
 
 $$
-\frac{\partial \ell}{\partial z} \;=\; p \,-\, e_y
+\frac{\partial \ell}{\partial z} = p - e_y
 $$
 
 where $e_y$ is the one-hot vector with a 1 at index $y$ and 0 elsewhere. Or in
@@ -277,7 +277,7 @@ Across positions `t`, with the mask factored in:
 
 $$
 \frac{\partial L_{\mathrm{SFT}}}{\partial z_t}
-\;=\; \frac{m_t}{N_{\mathrm{resp}}} \cdot (p_t - e_{y_t})
+ = \frac{m_t}{N_{\mathrm{resp}}} \cdot (p_t - e_{y_t})
 $$
 
 Or in code-style:

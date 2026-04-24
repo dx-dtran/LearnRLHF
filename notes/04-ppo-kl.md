@@ -29,7 +29,7 @@ model), measured in KL divergence. The RL objective becomes:
 
 $$
 J_{\mathrm{RLHF}}(\theta)
-\;=\; \mathbb{E}\!\left[\, r_{\mathrm{RM}}(\tau) \;-\; \beta \sum_t \mathrm{KL}\bigl(\pi_\theta(\cdot \mid s_t) \,\|\, \pi_{\mathrm{ref}}(\cdot \mid s_t)\bigr) \,\right]
+ = \mathbb{E}\left[ r_{\mathrm{RM}}(\tau) - \beta \sum_t \mathrm{KL}\bigl(\pi_\theta(\cdot \mid s_t) \| \pi_{\mathrm{ref}}(\cdot \mid s_t)\bigr) \right]
 $$
 
 Or in code-style:
@@ -62,7 +62,7 @@ Option B: distribute the KL penalty across tokens, one per step.
 InstructGPT picks option B. The per-token reward becomes:
 
 $$
-r_t \;=\; -\beta \cdot \mathrm{KL}_t \;+\; r_{\mathrm{RM}} \cdot \mathbf{1}[\,t = T_{\mathrm{last}}\,]
+r_t = -\beta \cdot \mathrm{KL}_t + r_{\mathrm{RM}} \cdot \mathbf{1}[ t = T_{\mathrm{last}} ]
 $$
 
 Or in code-style:
@@ -92,8 +92,8 @@ We want to estimate the KL divergence between the two policies *at that state*,
 defined as:
 
 $$
-\mathrm{KL}\bigl(\pi_\theta(\cdot \mid s_t) \,\|\, \pi_{\mathrm{ref}}(\cdot \mid s_t)\bigr)
-\;=\; \mathbb{E}_{a \sim \pi_\theta}\!\left[\, \log \pi_\theta(a \mid s_t) \,-\, \log \pi_{\mathrm{ref}}(a \mid s_t) \,\right]
+\mathrm{KL}\bigl(\pi_\theta(\cdot \mid s_t) \| \pi_{\mathrm{ref}}(\cdot \mid s_t)\bigr)
+ = \mathbb{E}_{a \sim \pi_\theta}\left[ \log \pi_\theta(a \mid s_t) - \log \pi_{\mathrm{ref}}(a \mid s_t) \right]
 $$
 
 Or in code-style:
@@ -107,9 +107,9 @@ one sample $a_t$ drawn from $\pi_\theta$. What's our best single-sample estimate
 Define the log-ratio for the token we drew:
 
 $$
-L_t \;=\; \log \pi_\theta(a_t \mid s_t) \,-\, \log \pi_{\mathrm{ref}}(a_t \mid s_t),
+L_t = \log \pi_\theta(a_t \mid s_t) - \log \pi_{\mathrm{ref}}(a_t \mid s_t),
 \qquad
-\rho_t \;=\; e^{L_t}
+\rho_t = e^{L_t}
 $$
 
 Or in code-style:
@@ -122,7 +122,7 @@ Three standard estimators, $k_1$, $k_2$, $k_3$:
 ### 3.1 $k_1$: the naive log-ratio
 
 $$
-k_1 \;=\; L_t
+k_1  =  L_t
 $$
 
 Or in code-style:
@@ -141,7 +141,7 @@ exactly what we use in `shape_reward`.
 ### 3.2 $k_2$: half-squared log-ratio
 
 $$
-k_2 \;=\; \tfrac{1}{2} L_t^2
+k_2  =  \tfrac{1}{2} L_t^2
 $$
 
 Or in code-style:
@@ -157,7 +157,7 @@ Or in code-style:
 ### 3.3 $k_3$: Schulman's unbiased-and-nonnegative
 
 $$
-k_3 \;=\; (\rho_t - 1) \,-\, L_t \;=\; e^{L_t} - 1 - L_t
+k_3 = (\rho_t - 1) - L_t = e^{L_t} - 1 - L_t
 $$
 
 Or in code-style:
@@ -170,7 +170,7 @@ Or in code-style:
   convexity of $e^x$). Equality only when $x = 0$.
 - **Unbiased** (with a caveat).
 - **Lower variance than $k_1$** in practice: when $k_1$ has a big-magnitude
-  negative sample, $k_3$ pulls it back up via the $\rho - 1$ term, and vice versa.
+ negative sample, $k_3$ pulls it back up via the $\rho - 1$ term, and vice versa.
 
 A quick geometric picture: `k_1` is just the raw log-ratio of whatever token you
 happened to draw. `k_3` adds a symmetric correction penalizing any deviation of
@@ -208,7 +208,7 @@ Putting it all together. After a rollout we have:
 Compute the per-token KL:
 
 $$
-\mathrm{KL}_{k1}[b, t] \;=\; \log \pi_\theta^{\text{old}}(a_t \mid s_t) \,-\, \log \pi_{\mathrm{ref}}(a_t \mid s_t)
+\mathrm{KL}_{k1}[b, t] = \log \pi_\theta^{\text{old}}(a_t \mid s_t) - \log \pi_{\mathrm{ref}}(a_t \mid s_t)
 $$
 
 Or in code-style:
@@ -218,7 +218,7 @@ Or in code-style:
 And the per-token reward:
 
 $$
-r[b, t] \;=\; -\beta \cdot \mathrm{KL}_{k1}[b, t] \cdot m[b, t] \;+\; r_{\mathrm{RM}}[b] \cdot \mathbf{1}[\,t = T_{\mathrm{last}}(b)\,]
+r[b, t] = -\beta \cdot \mathrm{KL}_{k1}[b, t] \cdot m[b, t] + r_{\mathrm{RM}}[b] \cdot \mathbf{1}[ t = T_{\mathrm{last}}(b) ]
 $$
 
 Or in code-style:
