@@ -26,6 +26,11 @@ the behavior is piecewise: some tokens have ordinary policy-gradient signal, som
 gradient because the ratio is clipped, some value predictions use the unclipped branch, and
 some use the clipped branch. The tests are designed to force each case to happen.
 
+Plain-English version: PPO says "learn from this batch, but do not overlearn from it." A
+token with a positive advantage should become more likely, and a token with a negative
+advantage should become less likely. The clip is a guardrail that stops a single old rollout
+from pushing the policy too far before fresh samples are collected.
+
 ---
 
 ## 1. Setup: importance-sampled policy gradient

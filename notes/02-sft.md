@@ -19,6 +19,12 @@ state the tensor contract before writing the code. For SFT, the contract is "log
 the next token, labels are shifted by one, and the mask is attached to the token being
 predicted." Almost every bug in this module is a violation of one of those three clauses.
 
+If you compare this to ordinary supervised learning, SFT is just "show the model examples of
+good assistant behavior and grade only the assistant parts." The prompt is like the question
+on an exam. The response is the student's answer. We do not grade the student for reproducing
+the question; we grade the answer. The `loss_mask` is the grading rubric that says which
+tokens count.
+
 ---
 
 ## 1. What SFT actually does

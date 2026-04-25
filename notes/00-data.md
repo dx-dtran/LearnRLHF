@@ -17,6 +17,13 @@ The job in Module 0 is therefore not just "download a dataset". It is to underst
 shape of the data well enough that, when a tensor looks suspicious three modules later, you
 can trace it back to the raw HH row and know what it was supposed to mean.
 
+Plain-English version: this module teaches you what the examples *mean* before you turn
+them into tensors. The rest of RLHF can feel abstract, but the data problem is very
+concrete. A row contains two possible assistant endings. A human preferred one. Your code
+has to preserve exactly that comparison while also producing the three views needed by SFT,
+RM, and PPO. If the views disagree about where the prompt ends or where the assistant answer
+begins, the later math will be correct on the wrong data.
+
 ---
 
 ## 1. What is HH-RLHF?

@@ -19,6 +19,13 @@ called `advantages` that PPO can optimize." If the advantage estimates are wrong
 loss will confidently push tokens in the wrong direction. That is why GAE gets its own note
 and its own tests.
 
+Beginner's guide picture: PPO is trying to answer one question for every generated token:
+"Should this exact token become more likely next time, or less likely?" The advantage is the
+number that answers that question. Positive advantage means "this token helped more than we
+expected." Negative advantage means "this token was worse than expected." GAE is the
+bookkeeping method that turns delayed rewards, value predictions, and masks into those
+per-token answers.
+
 ---
 
 ## 1. Notation for RL on text

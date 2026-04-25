@@ -12,6 +12,11 @@ leaving the SFT distribution too quickly." Most PPO failures are failures of thi
 either the policy barely moves, or it moves so far that the reward model is no longer a
 trustworthy guide.
 
+Think of the SFT model as the student's current style before RLHF starts. The reward model is
+the teacher's score. KL is the cost of changing style too aggressively while chasing that
+score. A little change is the point of training. A huge change is dangerous because the model
+may discover strange text that fools the grader but is worse for humans.
+
 By the end you should be able to:
 
 1. Say why the KL penalty is there at all.
@@ -193,7 +198,7 @@ to average to the right value over many samples. In training logs, however, nega
 single-sample KL values are visually confusing, which motivates the separate diagnostic
 estimator.
 
-Define the log-ratio for the token we drew:
+Define the current-policy log-ratio for the token we drew:
 
 $$
 L_t = \log \pi_\theta(a_t \mid s_t) - \log \pi_{\mathrm{ref}}(a_t \mid s_t),
@@ -205,6 +210,22 @@ Or in code-style:
 
     L_t   = log pi_theta(a_t | s_t) - log pi_ref(a_t | s_t)
     rho_t = exp(L_t)
+
+For the nonnegative diagnostic estimator, we will also use the inverse ratio:
+
+$$
+\bar{\rho}_t = e^{-L_t} = \frac{\pi_{\mathrm{ref}}(a_t \mid s_t)}{\pi_\theta(a_t \mid s_t)}
+$$
+
+Or in code-style:
+
+    inv_rho_t = exp(-L_t) = pi_ref(a_t | s_t) / pi_theta(a_t | s_t)
+
+This direction matters because our samples come from $\pi_\theta$. With samples from
+$\pi_\theta$, the identity
+$\mathbb{E}_{a \sim \pi_\theta}[\bar{\rho}_t - 1] = 0$ is what lets the diagnostic remain
+unbiased for the forward KL. If you accidentally use $\rho_t - 1$ instead, the expression is
+still nonnegative but no longer estimates the same KL under current-policy samples.
 
 Three standard estimators, $k_1$, $k_2$, $k_3$:
 
@@ -249,27 +270,30 @@ Or in code-style:
   KL in general.
 - Rarely used in modern RLHF. Included here for completeness.
 
-### 3.3 $k_3$: Schulman's unbiased-and-nonnegative
+### 3.3 $k_3$: Schulman's unbiased-and-nonnegative diagnostic
 
 $$
-k_3 = (\rho_t - 1) - L_t = e^{L_t} - 1 - L_t
+k_3 = (\bar{\rho}_t - 1) + L_t = e^{-L_t} - 1 + L_t
 $$
 
 Or in code-style:
 
-    k_3 = (rho_t - 1) - L_t
-        = exp(L_t) - 1 - L_t
+    k_3 = (inv_rho_t - 1) + L_t
+        = exp(-L_t) - 1 + L_t
 
 - Always **non-negative**, because $e^x - 1 - x \ge 0$ for all real $x$ (the
   exponential function lies above its tangent at 0, a direct consequence of
-  convexity of $e^x$). Equality only when $x = 0$.
-- **Unbiased** (with a caveat).
-- **Lower variance than $k_1$** in practice: when $k_1$ has a big-magnitude
- negative sample, $k_3$ pulls it back up via the $\rho - 1$ term, and vice versa.
+  convexity of $e^x$). Here set $x = -L_t$. Equality only when $L_t = 0$.
+- **Unbiased for forward KL under current-policy samples**, because
+  $\mathbb{E}_{a \sim \pi_\theta}[\bar{\rho}_t - 1] = 0$, so
+  $\mathbb{E}_{a \sim \pi_\theta}[k_3] = \mathbb{E}_{a \sim \pi_\theta}[L_t]$.
+- **Lower variance than $k_1$** in practice: the inverse-ratio correction pulls extreme
+  log-ratio samples back toward a more stable nonnegative diagnostic.
 
 A quick geometric picture: `k_1` is just the raw log-ratio of whatever token you
-happened to draw. `k_3` adds a symmetric correction penalizing any deviation of
-`rho` from 1 — both upside and downside.
+happened to draw. `k_3` adds a correction that is zero in expectation but makes each sample
+nonnegative, so the plot behaves like a distance-from-reference diagnostic instead of a noisy
+signed signal.
 
 Be careful about conventions when reading other PPO code or Schulman's blog posts. Some
 definitions use a ratio `p/q`, others use `q/p`, depending on which distribution produced the
@@ -287,7 +311,7 @@ logging diagnostic. Do not silently swap one for the other.
 - **Logging and diagnostics:** `k_3`.
   - Non-negative, so it plots as an interpretable "how far has the policy moved
     from ref" number.
-  - Downside: its gradient is `rho`, which is nonlinear — makes it a pain if you
+  - Downside: its gradient is nonlinear in the log-ratio — makes it a pain if you
     try to use it *as* the penalty.
 
 In this repo: `kl_k1` goes into `shape_reward`; `kl_k3` is computed for the CSV
@@ -393,8 +417,9 @@ model loophole. Pair the plot with samples.
 
 After finishing Problems 4.2 and 4.3, add:
 
-- Your own derivation that `exp(x) - 1 - x >= 0` for all `x`. Easy one-liner from
-  convexity: `exp(x)` lies above its tangent at `x = 0`.
+- Your own derivation that `exp(-x) - 1 + x >= 0` for all `x`. Easy one-liner from
+  convexity: set `u = -x`, then `exp(u) - 1 - u >= 0` because `exp(u)` lies above
+  its tangent at `u = 0`.
 - A small experiment: pick two fixed discrete distributions, compute their *exact*
   KL analytically, then sample from one and estimate the KL using both `k_1` and
   `k_3`. Verify that both are approximately unbiased and that `k_1` has clearly

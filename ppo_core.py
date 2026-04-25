@@ -118,8 +118,9 @@ def kl_k3(logprobs: torch.Tensor, ref_logprobs: torch.Tensor) -> torch.Tensor:
     """
     Schulman's "k3" estimator:
 
-        r   = exp(logprobs - ref_logprobs)
-        kl3 = (r - 1) - log r                              (always >= 0, lower variance)
+        logratio = logprobs - ref_logprobs
+        inv_r    = exp(-logratio)
+        kl3      = (inv_r - 1) + logratio                  (always >= 0, lower variance)
 
     Use this for LOGGING (it's strictly nonnegative and visually cleaner). Use k1 as the
     penalty that shapes rewards (unbiased).

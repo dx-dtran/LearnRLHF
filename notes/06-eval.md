@@ -16,6 +16,11 @@ model score, KL, and win-rate are all useful, but none of them substitutes for r
 model's answers. The final question is not "did a scalar improve?" It is "does this assistant
 follow instructions better in ways a human can recognize?"
 
+Read evaluation like a product review, not like a single metric. Base GPT-2 should reveal why
+instruction tuning is needed. SFT should reveal what imitation buys you. RLHF should reveal
+whether optimizing the learned preference signal improved answers beyond imitation or merely
+changed their style. The side-by-side table is where those differences become visible.
+
 ---
 
 ## 1. Generation comparison (Problem 6.1)
