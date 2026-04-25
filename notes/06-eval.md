@@ -11,6 +11,11 @@ at this stage — the theory is all behind you. This note is about:
 
 Fill this file in with your actual outputs as you run the problems.
 
+Evaluation is where you stop optimizing proxies and look at behavior. Training loss, reward
+model score, KL, and win-rate are all useful, but none of them substitutes for reading the
+model's answers. The final question is not "did a scalar improve?" It is "does this assistant
+follow instructions better in ways a human can recognize?"
+
 ---
 
 ## 1. Generation comparison (Problem 6.1)
@@ -19,6 +24,10 @@ Build a table with one row per held-out prompt (target: 20 prompts) and one
 column per model (base, SFT, RLHF). Each cell holds the generated response,
 trimmed to the first `<|im_end|>` or to a reasonable cutoff if the model never
 stops.
+
+Keep the prompts fixed and save them. A stable prompt set lets you compare runs across
+hyperparameter changes. If every run uses a new random set of prompts, you will never know
+whether a difference came from the model or the sample.
 
 ### 1.1 Prompt selection
 
@@ -31,6 +40,10 @@ training. A reasonable mix:
 - 5 edge cases where base GPT-2 is known to fail: long multi-step instructions,
   requests for specific formats (like JSON or tables), requests for lists.
 
+The mix matters because models can improve unevenly. SFT may mostly improve role-following.
+RLHF may mostly improve helpfulness or refusal style. A prompt set that contains only easy
+factual questions will miss formatting, conversational, and instruction-following failures.
+
 ### 1.2 Generation settings
 
 **Keep them identical across all three models.** Temperature 1.0, top-p 0.9 (or
@@ -41,6 +54,10 @@ variance.
 For a more deterministic comparison you can also generate with temperature 0
 (greedy). More boring to read, but removes all sampling noise so the differences
 are fully attributable to the model weights.
+
+A good practice is to run both: greedy for a clean model-to-model comparison, and sampled
+generation for a more realistic view of behavior. Greedy outputs can hide diversity problems;
+sampled outputs can hide regressions behind randomness. Together they give a better picture.
 
 ### 1.3 Format
 
@@ -53,6 +70,10 @@ A markdown table like:
 ```
 
 Paste it under a "Results" section in this file.
+
+When the table is large, readability matters. Trim extremely long responses, but do not trim
+away the failure. If a model rambles, show enough rambling that the failure mode is visible.
+If a model never emits `<|im_end|>`, note that explicitly.
 
 ---
 
@@ -92,6 +113,11 @@ SFT and the run failed. Likely reasons:
 - Too few PPO iterations.
 - Reward hacking that isn't visible on these particular prompts.
 
+Treat 20 prompts as a smoke test, not a publication-grade benchmark. A 55% win-rate on 20
+items is only a weak signal, but it is enough to catch obvious regressions and to force
+manual inspection. If you want stronger evidence, increase the prompt count and keep the
+annotation protocol blinded.
+
 ### 2.4 If RLHF didn't win
 
 Don't paper over it. Write down honestly:
@@ -102,11 +128,19 @@ Don't paper over it. Write down honestly:
 
 Then actually change it and try again, if you want to.
 
+The most useful failed evaluation is specific. "RLHF lost" is not specific. "RLHF gives
+longer answers that score well but ignore requested JSON formatting" is specific, and it
+points toward checking reward length bias and format-sensitive prompts.
+
 ---
 
 ## 3. The retrospective (Problem 6.3)
 
 One page, answering these six questions directly.
+
+The retrospective should be technical, not sentimental. Name the bug, the symptom, the test
+that caught it, and the fix. The point is to make the next RLHF implementation easier because
+you have a written catalog of failure modes.
 
 ### 3.1 What was the hardest part?
 
@@ -120,6 +154,10 @@ memory with four models loaded at once.
 Count your commits and your notes. The gap between "how hard I thought it would
 be" and "how long it actually took" is diagnostic. Almost always, the answer
 reveals where your mental model was the weakest.
+
+This is worth writing down because time spent is a better teacher than confidence. If a
+concept felt easy but consumed two days, that concept deserves another derivation or a better
+unit test.
 
 ### 3.3 Which gradient check saved you?
 
@@ -153,6 +191,10 @@ Pick one thing. Write two paragraphs. "I used to think X; now I think Y." If you
 can't think of one, you didn't learn anything and you should redo the course.
 But you *will* find one.
 
+Good examples are concrete: "I used to think PPO clipping just limited ratios; now I
+understand it clips only advantage-improving moves." Or: "I used to think masking was a
+data-loader detail; now I understand it defines the actual supervised objective."
+
 ---
 
 ## 4. What to commit to `notes/06-eval.md`
@@ -163,3 +205,7 @@ But you *will* find one.
 
 This is the last file in the curriculum. When it's complete, the course is
 complete.
+
+At that point, the notes should be useful without the code open. A future reader should be
+able to understand what was trained, how it was evaluated, which results were convincing, and
+which parts still need work.

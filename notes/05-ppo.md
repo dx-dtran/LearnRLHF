@@ -12,6 +12,11 @@ all in `04-*.md`. This note zooms out and talks about:
 4. How to make the code work for all four GPT-2 sizes, even if the larger ones
    OOM.
 
+Module 5 is where correct small functions become a training system. The individual losses can
+all pass gradient checks and the full PPO run can still fail because tensors are stale,
+models are in the wrong mode, or logging hides the first sign of instability. Read this note
+as an execution checklist as much as a theory note.
+
 ---
 
 ## 1. The four models
@@ -40,6 +45,11 @@ choice and there's a real alternative:
 For 24GB we use shared. If you scale up to `gpt2-medium` and training feels
 unstable, splitting off the value head is a one-line experiment worth trying.
 
+Shared backbone means the value loss is not isolated. A large value gradient updates the same
+hidden representations used by the policy logits. That can be helpful because value learning
+teaches useful features, but it also means the value coefficient and clipping are not
+secondary details. They directly affect the policy backbone.
+
 ### 1.1 Weight initialization
 
 - **Policy**: load from `sft.pt`.
@@ -50,6 +60,10 @@ unstable, splitting off the value head is a one-line experiment worth trying.
   `V_0(s) ≡ 0` at the start. Advantages equal returns initially, and the value
   head gets to learn fresh without corrupting early policy updates. Common
   folklore in PPO implementations.
+
+Zero-initializing only the value head does not make the whole model uninformative. The shared
+backbone still contains SFT representations. The zero head simply says "before seeing PPO
+returns, predict no extra shaped reward." That is a conservative starting baseline.
 
 ---
 
@@ -73,6 +87,11 @@ stored only for trainable parameters. Activations are gradient-checkpointed.
 
 **Total: roughly 7–10 GB.** Plenty of headroom on a 24GB card.
 
+If your measured memory is much higher than this, look for accidental gradient tracking
+through the reference or reward model, missing `torch.no_grad()` in rollout, or storing full
+logit tensors in the rollout buffer. Rollouts should store gathered log-probs, not
+vocabulary-sized distributions for every token.
+
 ### 2.2 gpt2-medium (355M) is tight
 
 Weights and optimizer state both scale roughly linearly, so medium is about 3x
@@ -87,6 +106,11 @@ larger. You'll need:
 Write a small script that instantiates all four models, runs one dummy forward,
 and prints `torch.cuda.max_memory_allocated()`. Log the output into this note
 for every size that fits.
+
+Reset peak memory stats before the dummy forward so the number reflects the operation you are
+measuring. Also record the batch size, sequence length, dtype, and whether gradient
+checkpointing is enabled. A memory number without those conditions is hard to interpret
+later.
 
 ---
 
@@ -147,6 +171,11 @@ Three invariants to keep straight:
 - **All advantages and returns are stop-gradient.** Detach everything coming out
   of the rollout before storing it.
 
+A fourth practical invariant: frozen models stay frozen. The reference and reward model
+should be in eval mode, under `torch.no_grad()`, and have `requires_grad_(False)`. Any
+optimizer parameter group that accidentally includes them is both a memory bug and an
+algorithm bug.
+
 ---
 
 ## 4. The inner loop (Problem 5.3)
@@ -161,12 +190,21 @@ steps — the "effective batch dim" for the inner loop is essentially
 A simpler alternative is to slice by row (whole sequences stay together). Either
 works; row-wise is slightly easier to get the masking right.
 
+For a teaching implementation, row-wise minibatches are usually worth the small loss of
+randomness. Keeping complete response sequences together makes it easier to inspect one row's
+prompt, response, old log-probs, advantages, and mask when something looks wrong.
+
 ### 4.2 K epochs
 
 `K = 4` is the standard choice. More epochs amortize rollout cost better (less
 generation per step of compute), but also let the policy drift further from
 `pi_old`. The clip handles some of that drift, but not indefinitely. If you see
 clip fraction above 40%, lower `K`.
+
+This is why PPO has both an outer iteration count and inner epochs. The rollout policy is
+fixed for one outer iteration. Every inner epoch makes the current policy less like that
+rollout policy. At some point the data is too stale, and clipping turns most tokens into
+zero-gradient cases.
 
 ### 4.3 Gradient flow
 
@@ -175,6 +213,10 @@ clip fraction above 40%, lower `K`.
 - **Entropy gradient** enters via `logits_new` inside `H`.
 - All three backpropagate through the shared backbone in one backward pass. You
   do **not** step the policy and the value head separately.
+
+Stepping separately would make the second loss see parameters already changed by the first
+loss, which complicates the meaning of the PPO update. Combine the terms, run one backward
+pass, clip one combined gradient norm, and take one optimizer step.
 
 ---
 
@@ -195,6 +237,10 @@ enough; emit matplotlib plots every 50 iterations so you can eyeball trajectorie
 | `tokens_per_sec`   | Roughly constant. Drops signal memory pressure or disk/IO issues.         |
 | `response_length`  | Watch for a slow creep upward — that's length bias in the RM showing up. |
 
+Add sample generations to the logging habit. Every few iterations, save a small fixed set of
+prompts and responses. Plots tell you what the optimizer is doing; samples tell you what the
+model is becoming.
+
 ### 5.1 Healthy pattern
 
 Reward climbs, KL climbs slowly, entropy drifts down slowly, clip fraction sits
@@ -213,6 +259,10 @@ around 20%, grad norm stable, tokens/sec stable.
 - **Grad norm exploding.** Lower lr. Check the value loss in particular — usually
   it's the value head overshooting. Make sure the value clip `eps_v` is on and
   working correctly.
+
+When a run fails, change one knob at a time. PPO metrics are coupled: lowering LR can reduce
+KL, clip fraction, and reward growth all at once. If you change LR, beta, K, and response
+length together, you will not know which change helped.
 
 ---
 
@@ -238,6 +288,10 @@ OOM, which is fine — the requirement is just that the code compiles and the
 forward shapes are correct, not that it trains at full scale.
 
 Log the memory table into this note.
+
+The scaling exercise is also a test of whether dimensions are centralized. If changing model
+size requires editing constants in multiple files, the config abstraction is not doing its
+job. The model may still run, but it will be fragile.
 
 ---
 

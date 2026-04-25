@@ -14,6 +14,11 @@ covers:
 Related notes: `04-ppo-kl.md` (the KL penalty) and `04-ppo-policy.md` (the PPO
 clipped surrogate, value loss, entropy). Read those after this one.
 
+This note is the bridge between "we sampled text and assigned rewards" and "we have a tensor
+called `advantages` that PPO can optimize." If the advantage estimates are wrong, the policy
+loss will confidently push tokens in the wrong direction. That is why GAE gets its own note
+and its own tests.
+
 ---
 
 ## 1. Notation for RL on text
@@ -45,6 +50,11 @@ $\gamma$ is a discount factor in $[0, 1]$. For text RL we use $\gamma = 1$ — e
 are short, and we want credit assignment to flow across the entire response without
 the exponential dampening that $\gamma < 1$ would give.
 
+Using $\gamma = 1$ does not mean every token receives equal blame or credit. The GAE
+parameter $\lambda$ and the value baseline still control how the terminal reward is spread
+backward. It only means we are not deliberately discounting later text because it occurs later
+in the response.
+
 ### 1.1 A concrete rollout
 
 If this is your first time meeting RL, the abstractions above can feel slippery.
@@ -71,6 +81,11 @@ from the RM (its scalar opinion of the whole response).
 That's one rollout. An iteration of PPO generates a batch of many such rollouts
 in parallel. Every quantity in the rest of this note is defined on these
 per-token tuples $(s_t, a_t, r_t)$.
+
+Notice that the "environment" transition is simple for text: append the sampled token. The
+difficulty is not environment dynamics; it is credit assignment. A good final answer may
+depend on many earlier tokens, and a bad answer can be caused by one early commitment that
+made the rest of the response hard to recover.
 
 ---
 
@@ -166,6 +181,11 @@ Intuition for the end result: at each step, we nudge the model to make the actio
 it took more (or less) likely, weighted by how good the future turned out to be.
 "Take what worked, do more of it" — gradient descent on trial and error.
 
+The theorem is powerful because it avoids differentiating through the sampling operation.
+Sampling a token is discrete, so ordinary backpropagation cannot pass through "which token
+was chosen." The log-derivative trick moves the gradient onto the log-probability assigned
+to the sampled token. That is the core trick behind policy gradients.
+
 ### 2.3 What this means intuitively
 
 At each position `t`, for the token `a_t` we actually sampled, we nudge the model to
@@ -180,6 +200,11 @@ That's it. That's the policy gradient. It's intuitive and correct.
 cumulative reward depends on many sampled tokens' worth of randomness. So even if
 our policy is good, the gradient estimate has huge variance. Lowering that variance
 without introducing bias is the whole game from here on.
+
+For language, the variance problem is severe. A response may get one terminal RM score, but
+hundreds of sampled token decisions contributed to that score. If every token receives the
+same raw terminal return, the gradient is noisy and blunt. Advantages are how we sharpen that
+signal.
 
 ---
 
@@ -233,6 +258,11 @@ what we expected before taking it? An analogy: a golfer's handicap gives you the
 expected score. Your actual score minus your handicap is your "advantage" for that
 round — it tells you whether you played above or below expectation.
 
+In PPO code, a positive advantage means "increase the probability of this sampled token."
+A negative advantage means "decrease it." This sign interpretation is the fastest sanity
+check for the whole RL stack. If your loss makes positive-advantage tokens less likely, the
+policy gradient sign is wrong.
+
 The variance-reduced policy gradient:
 
 $$
@@ -264,6 +294,10 @@ Read this as: "the reward I actually got, plus what the value function says is l
 to earn from the next state, minus what I had expected from this state". It's the
 part of the return at time $t$ that wasn't predicted by the value function. (TD
 stands for "temporal difference".)
+
+The TD error is a surprise signal for the value function. Positive $\delta_t$ says the step
+turned out better than the value estimate predicted. Negative $\delta_t$ says it turned out
+worse. GAE accumulates these surprises backward through time.
 
 We can build advantage estimators out of TD errors, and we can pick how many of
 them to use:
@@ -326,6 +360,10 @@ $\delta_t$ cancels the $-V(s_{t+1})$ from $\delta_{t+1}$, and so on.)
 As `n` grows, bias falls and variance rises. GAE gives us a single knob that slides
 smoothly between these choices.
 
+This is the central bias-variance tradeoff in value-based credit assignment. Trust the value
+function too much and you inherit its bias. Trust sampled returns too much and you inherit
+their noise. GAE does not eliminate the tradeoff; it gives you a practical dial.
+
 ---
 
 ## 5. Generalized Advantage Estimation (Schulman et al. 2016)
@@ -381,6 +419,11 @@ by convention and $A_T = 0$.
 This recursion runs *backwards* through time, from `T-1` down to `0`, and that's
 how we compute it in code.
 
+The backward loop is not just an implementation convenience. It mirrors the recursion:
+`A[t]` depends on `A[t+1]`, so the future advantage must already be known. In vectorized code
+you can get fancy, but the Python backward loop is clearer and fast enough for the small
+response lengths in this repo.
+
 ### 5.3 Algorithm
 
 ```
@@ -395,6 +438,10 @@ The `nonterm[t+1]` factor is how we handle variable-length sequences in a batche
 loop. It's 1 if position `t+1` is still part of the real episode, 0 if it's
 padding or beyond the end. When `nonterm = 0`, the bootstrap from the future is
 zeroed out.
+
+This mask is what prevents one row's padding from becoming fake future reward. Without it,
+advantages can leak across the artificial tail after EOS. That is especially dangerous in
+batched text generation because different rows finish at different times.
 
 ### 5.4 Returns as value targets
 
@@ -420,6 +467,11 @@ itself depends on `V_t`. Nothing would train.
 In practice: compute the advantages and returns under `torch.no_grad()` (or detach
 the values first). The `ppo_core.gae` function can stay pure; the `train_ppo.py`
 driver is responsible for wrapping it correctly.
+
+If you forget this stop-gradient rule, the value loss can partially cancel itself through the
+target. The code may run, but the optimization problem is no longer "predict fixed returns."
+It becomes "move predictions and labels together," which weakens or destroys the value
+training signal.
 
 ### 5.5 Unit test (Problem 4.4)
 
@@ -462,6 +514,10 @@ Two pieces:
 
 See `04-ppo-kl.md` for the KL penalty details — why it's there, what estimator we
 use, and how it's computed.
+
+The important timing detail is that the RM reward is computed after the full response exists,
+while the KL cost is available at every generated token. GAE combines those two time scales:
+local KL penalties and a delayed terminal preference score.
 
 Two consequences worth understanding:
 
@@ -507,6 +563,10 @@ the mask is 1 — the real response tokens. Padding tokens are garbage data, and
 you let them into the stats, they'll pollute the normalization. The unit test in
 Problem 4.8 inserts huge garbage values at masked positions and asserts that the
 normalized output's mean and std are unchanged.
+
+After normalization, masked positions can contain any value as long as the loss later ignores
+them. For human sanity, it is often cleaner to zero them out after normalization, but the
+mathematical requirement is that they do not influence the mean, variance, or PPO loss.
 
 ---
 

@@ -6,6 +6,12 @@ Theory packet for Problems 4.2 and 4.3 (per-token KL and reward shaping). Short 
 but the KL term is the single biggest cause of "why is PPO unstable?" problems on
 text. Read carefully.
 
+The KL term is the safety rail for PPO. The reward model points toward responses that look
+better according to learned preferences; the KL penalty says "do not get that improvement by
+leaving the SFT distribution too quickly." Most PPO failures are failures of this tradeoff:
+either the policy barely moves, or it moves so far that the reward model is no longer a
+trustworthy guide.
+
 By the end you should be able to:
 
 1. Say why the KL penalty is there at all.
@@ -49,6 +55,12 @@ Five facts to internalize:
 5. **It equals zero iff the two distributions agree everywhere.** The smallest
    disagreement gives a strictly positive number.
 
+The direction matters. $\mathrm{KL}(\pi_\theta \| \pi_{\mathrm{ref}})$ averages over tokens
+the current policy actually samples. It asks: "how surprising are my current-policy samples
+under the reference?" The reverse direction would average over reference samples and answer a
+different question. In PPO rollouts we naturally have samples from the current policy, so the
+forward direction is the convenient one.
+
 A tiny worked example. Say the vocabulary has three outcomes. Policy $\pi$ thinks
 the probabilities are $(0.5,\, 0.3,\, 0.2)$. Reference $\pi_{\mathrm{ref}}$ thinks
 $(0.4,\, 0.4,\, 0.2)$. Plug in:
@@ -71,6 +83,11 @@ Intuition for why KL shows up in RLHF: the SFT policy $\pi_{\mathrm{ref}}$ is ou
 is reported as a KL number, and we can put a price on that movement. The
 optimization then decides, at every token, whether chasing extra reward is worth
 the KL cost.
+
+This is not saying the SFT model is perfect. It is saying the SFT model is the region where
+the reward model has the best chance of being meaningful. If PPO wanders into bizarre text
+that the RM never saw during training, a high reward score is no longer evidence of a good
+answer. KL keeps the search local enough that the reward signal remains usable.
 
 ---
 
@@ -110,6 +127,10 @@ Two different ways to understand this penalty, both true:
 
 `pi_ref` is a **frozen copy of `sft.pt`**. It never gets updated during PPO.
 
+Freezing the reference is essential. If the reference moved with the policy, the KL penalty
+would chase a moving target and stop measuring distance from the original supervised model.
+The whole point is to keep one stable anchor while the policy learns.
+
 ---
 
 ## 2. Why *per-token* KL, not per-episode?
@@ -136,6 +157,10 @@ Two reasons this is better:
 - **Numerical scale.** Per-episode KL is the sum of per-token KLs. Over 256
   tokens that's a much bigger scalar and makes `beta` much harder to tune.
 
+Per-token KL also makes logging more interpretable. You can look at mean KL per token and
+total KL per response separately. A response with many low-KL tokens and one huge-KL token is
+a different failure mode from a response whose every token is slightly off-distribution.
+
 ---
 
 ## 3. Three KL estimators
@@ -161,6 +186,12 @@ Or in code-style:
 
 But we don't have the full distribution or an exact expectation. We have exactly
 one sample $a_t$ drawn from $\pi_\theta$. What's our best single-sample estimate?
+
+This sample-based setting is why the estimators below can look strange. A true KL divergence
+is nonnegative, but a one-sample estimate of it does not have to be. The estimator only needs
+to average to the right value over many samples. In training logs, however, negative
+single-sample KL values are visually confusing, which motivates the separate diagnostic
+estimator.
 
 Define the log-ratio for the token we drew:
 
@@ -195,6 +226,12 @@ Or in code-style:
 
 This is what InstructGPT uses as the shaping penalty in the per-token reward. It's
 exactly what we use in `shape_reward`.
+
+Because `k_1` is just a log-prob difference, its gradient with respect to the current
+log-prob is simple. That simplicity is useful for reward shaping: a token that is more likely
+under the current policy than the reference pays a positive cost, and a token that is less
+likely receives a negative sample contribution. Over samples, the expectation is the forward
+KL.
 
 ### 3.2 $k_2$: half-squared log-ratio
 
@@ -234,6 +271,12 @@ A quick geometric picture: `k_1` is just the raw log-ratio of whatever token you
 happened to draw. `k_3` adds a symmetric correction penalizing any deviation of
 `rho` from 1 — both upside and downside.
 
+Be careful about conventions when reading other PPO code or Schulman's blog posts. Some
+definitions use a ratio `p/q`, others use `q/p`, depending on which distribution produced the
+samples and which KL direction is being estimated. In this repo, the important practical
+rule is simple: use `k_1` for the shaping penalty, and use the nonnegative `k_3` helper as a
+logging diagnostic. Do not silently swap one for the other.
+
 ### 3.4 Which do we use for what?
 
 - **Penalty inside the per-token reward (shaping):** `k_1`.
@@ -249,6 +292,10 @@ happened to draw. `k_3` adds a symmetric correction penalizing any deviation of
 
 In this repo: `kl_k1` goes into `shape_reward`; `kl_k3` is computed for the CSV
 log but not used in gradients.
+
+That separation is intentional. The training reward should match the algorithm you are
+studying. The logging metric should be easy to read. Those are related goals, but they are
+not identical goals.
 
 ---
 
@@ -288,6 +335,11 @@ The indicator `(t == last_response_token_of_row_b)` is 1 exactly once per row �
 at the last real token of that row's response. That's where the terminal RM
 reward gets injected.
 
+This construction turns a sequence-level score into a token-level RL problem. Before the
+last token, the reward mostly says "stay close to the reference." At the last token, the
+reward says "and the whole response was this good according to the RM." GAE then propagates
+that terminal information backward through the response according to $\gamma$ and $\lambda$.
+
 ### Edge cases to verify
 
 - If a row ended early via `<|im_end|>`, that EOS position is the "last real
@@ -311,6 +363,10 @@ We default to a **fixed** `beta = 0.02` in this repo because it's simpler and go
 enough for a teaching implementation. Adaptive KL is a nice 30-minute extension
 once everything else is working — not required.
 
+Fixed beta is easier to reason about while learning because one knob has one meaning. Adaptive
+beta adds a controller on top: now you must debug both PPO and the controller's response to
+PPO. Save that complexity until the fixed-beta path is correct and well logged.
+
 ---
 
 ## 6. Common pitfalls
@@ -326,6 +382,10 @@ once everything else is working — not required.
   Classic reward hacking — raise `beta`.
 - **`beta` too large.** Reward barely moves, entropy collapses, responses look
   like SFT with minor cosmetic differences. Lower `beta`.
+
+When diagnosing KL issues, always inspect generated text. A scalar KL number can tell you the
+policy moved; it cannot tell you whether the movement improved helpfulness or found a reward
+model loophole. Pair the plot with samples.
 
 ---
 

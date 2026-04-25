@@ -21,6 +21,11 @@ By the end you should be able to:
 3. Derive the clipped value loss and explain why the clip helps early in training.
 4. Derive the gradient of the masked entropy term.
 
+This note is where PPO becomes an implementation minefield. The formulas are compact, but
+the behavior is piecewise: some tokens have ordinary policy-gradient signal, some have zero
+gradient because the ratio is clipped, some value predictions use the unclipped branch, and
+some use the clipped branch. The tests are designed to force each case to happen.
+
 ---
 
 ## 1. Setup: importance-sampled policy gradient
@@ -40,6 +45,11 @@ batch for multiple gradient updates, and (b) *clip* the importance ratio so that
 after a few updates the policy can't wander far enough from the rollout policy
 to make the estimator blow up. The rest of this note is just making that trick
 precise.
+
+The outer-loop/inner-loop structure is the practical motivation. Rollout is expensive because
+generation is autoregressive. Once you have a rollout batch, you want to squeeze several
+optimizer steps out of it. PPO is the compromise that lets you do that without pretending old
+samples are still perfectly on-policy.
 
 Recall from `04-ppo-gae.md` that the policy gradient with advantage baseline is:
 
@@ -82,6 +92,11 @@ Or in code-style:
 
 As long as $\pi_\theta$ stays close to $\pi_{\mathrm{old}}$, the gradient of this
 rewritten expression equals the true policy gradient.
+
+The ratio is computed only for the action that was actually sampled. We are not comparing
+entire vocabulary distributions in the policy loss. For each response token, PPO asks:
+"Under the new policy, how much more or less likely is the exact token we sampled during
+rollout?"
 
 **The catch.** If `pi_theta` drifts far from `pi_old`, the ratios `rho_t` can
 become enormous or tiny, and the gradient estimator explodes with variance. Every
@@ -136,6 +151,11 @@ i.e. the less favorable one. This is the key idea — the surrogate is set up so
 that the policy cannot be rewarded for running the ratio far outside
 `[1 - eps, 1 + eps]` in the direction of increasing the objective.
 
+The negation is a common source of confusion. PPO papers usually describe maximizing the
+surrogate objective. PyTorch optimizers usually minimize a loss. This repo writes the loss as
+negative objective. When checking signs, always ask whether gradient descent on the loss
+increases good-token log-probs and decreases bad-token log-probs.
+
 A quick sanity check with numbers. Set $\varepsilon = 0.2$ so the clip range is
 $[0.8,\, 1.2]$. Pick two tokens:
 
@@ -156,6 +176,11 @@ That asymmetry is the whole point: we are only "pessimistic" (clip to avoid big
 moves) when the policy would otherwise enjoy a reward for a move that has already
 gotten extreme. If the move is extreme in a *costly* direction, we let the
 gradient keep flowing.
+
+Said differently: PPO clips improvements that are too large, not mistakes that need fixing.
+For positive advantages, too-large improvement means the sampled token became much more
+likely. For negative advantages, too-large improvement means the sampled token became much
+less likely. The table below is just that sentence written out case by case.
 
 ### 2.2 What "pessimistic" means, case by case
 
@@ -201,6 +226,11 @@ Or in code-style:
 At $\rho = 1$ (on-policy limit), this simplifies to $-A$, which recovers the
 vanilla policy gradient direction.
 
+This is the most useful local sanity check. At the beginning of an inner loop,
+`logprobs_new` should equal `logprobs_old`, so $\rho \approx 1$. In that first minibatch,
+the PPO policy gradient should behave like the vanilla advantage-weighted log-prob gradient.
+If it does not, the ratio or loss sign is wrong.
+
 For the clipped case, $\mathrm{surr}_2 = (\text{constant w.r.t. } \theta) \cdot A$.
 The clip saturates, so changing $\log \pi_\theta$ doesn't change $\mathrm{surr}_2$.
 Therefore:
@@ -214,6 +244,11 @@ Or in code-style:
     d L / d log pi_theta = 0
 
 That token contributes zero signal to this gradient step.
+
+Zero signal does not mean the token is ignored forever. It means this particular rollout
+sample has already moved far enough in the advantage-improving direction for this inner-loop
+update. A future rollout may sample different tokens, compute different advantages, and
+produce fresh gradients.
 
 Verify this with an **edge test** in Problem 4.5. Set every ratio to a large
 value (say `rho = 5`) and `A > 0`. Every token should land in the "A > 0,
@@ -234,6 +269,11 @@ Contrast with TRPO, PPO's predecessor: TRPO solves a hard constrained
 optimization at every step with conjugate-gradient. PPO gets comparable
 performance with `min(surr1, surr2)` and a standard optimizer. That simplicity is
 why everyone uses PPO.
+
+Clip fraction is therefore both a diagnostic and a control signal. Near 0% can mean updates
+are tiny or the policy is barely learning. Near 80% means the optimizer is trying to move far
+beyond the trust region and the clip is doing most of the work. Healthy PPO usually lives in
+the middle.
 
 ---
 
@@ -263,6 +303,10 @@ Or in code-style:
     L_V_unclipped = (1 / (2*N)) * sum over (b, t) of mask[b, t] * (V_theta(s_t) - R_t)^2
 
 Gradient is `mask * (V_theta - R) * dV_theta/dtheta` — standard MSE.
+
+The factor of `1/2` exists so the derivative of the square is clean: derivative of
+`0.5 * (V - R)^2` with respect to `V` is just `V - R`. It has no deeper meaning, but it keeps
+the algebra and code comments tidy.
 
 ### 3.2 Clipped form
 
@@ -295,6 +339,11 @@ to pessimistically pick the larger squared error — i.e. the worse of the two
 predictions — as our training loss. That keeps `V_theta` from jumping too far in
 any single update.
 
+The value clip is often less discussed than the policy clip, but it matters in RLHF because
+reward scales are learned, not fixed by an environment. Early in training, the value head may
+see noisy returns whose scale changes as the policy moves. Clipping prevents the value
+function from overreacting to one batch and then poisoning the next batch's advantages.
+
 ### 3.3 Why clip the value at all
 
 Early in PPO training, the policy is barely moving while the value head is
@@ -306,6 +355,11 @@ destabilizes.
 
 Clipping `V_theta` to stay within `eps_v` of its previous value keeps advantages
 on a stable scale across updates, at the cost of slower value learning.
+
+This is a deliberate tradeoff. A slightly underfit value function gives noisier advantages.
+An unstable value function gives wrong advantages. PPO usually prefers the first problem
+because noise averages out, while systematically wrong advantages push the policy in bad
+directions.
 
 In the on-policy limit (when `V_theta = V_old`), both branches of the max are
 equal and the clip has no effect. As `V_theta` drifts, the clip kicks in.
@@ -347,6 +401,11 @@ The negative sign means a gradient step *increases* entropy — rewarding the po
 for keeping its per-token distributions broad. This prevents **premature mode
 collapse**, where the policy becomes almost deterministic (always picks the
 argmax) early on and stops exploring alternatives.
+
+In text, entropy collapse often shows up as repetitive phrasing, very short generic answers,
+or the same high-reward pattern appearing across many prompts. The entropy bonus is not a
+quality objective by itself; it is a pressure that keeps exploration alive while the reward
+and KL terms shape behavior.
 
 In our config, `c_entropy = 0.0` by default — we start without an entropy bonus.
 If you see the policy go deterministic within a few iterations (entropy dropping
@@ -429,6 +488,11 @@ $$
 
     d H / d z  =  - p * (log p + H)
 
+The sign can be checked at the extremes. If one token has probability near 1, its
+`log p` is near 0 while `H` is small but positive, so the gradient of entropy with respect to
+that dominant logit is negative. Since the loss contains `-c_entropy * H`, gradient descent
+pushes that dominant logit down, spreading probability mass out.
+
 ### 4.4 Sanity check
 
 - **Uniform distribution** (`p[v] = 1/V` for all `v`): `log p[v] = -log V`,
@@ -463,6 +527,12 @@ Typical coefficients (our config):
 Backward through the sum, clip the gradient norm at 1.0, step the optimizer. Four
 epochs over the rollout batch (Problem 5.3) before you throw away the rollout and
 start the next outer iteration.
+
+All three terms share the same logits/backbone in the default implementation, so their
+relative coefficients matter. A huge value coefficient can turn PPO into mostly value
+regression. A huge entropy coefficient can prevent the policy from becoming decisive. A
+policy LR that is too high can make the clip fraction spike even when the loss numbers look
+finite.
 
 ---
 

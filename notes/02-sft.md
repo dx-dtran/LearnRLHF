@@ -14,6 +14,11 @@ SFT is the easiest of the three training phases. But the masking logic is *criti
 A single off-by-one or inverted mask here will quietly corrupt every downstream phase
 (RM and PPO both assume SFT was done correctly).
 
+This module is also where you build the habit that carries through the rest of the repo:
+state the tensor contract before writing the code. For SFT, the contract is "logits predict
+the next token, labels are shifted by one, and the mask is attached to the token being
+predicted." Almost every bug in this module is a violation of one of those three clauses.
+
 ---
 
 ## 1. What SFT actually does
@@ -30,6 +35,11 @@ The mental model: the model sees the entire dialogue, but during training we onl
 "grade" it on its predictions of assistant tokens. It can look at user messages for
 context, but we never ask it "predict the next user token" — user text is input,
 assistant text is the target.
+
+Another way to say this: SFT changes the *data distribution* and the *mask*, not the basic
+language-modeling machinery. The transformer still produces one vocabulary distribution per
+position. The loss still asks for high probability on the next token. The only question is
+which next-token predictions are educational for the behavior we want.
 
 ---
 
@@ -56,6 +66,12 @@ loss_mask   = m[1:]       # 1 iff the token we're trying to predict is assistant
 From now on when we say "position `t`" we mean the shifted frame — so the model's
 logits at position `t` predict `labels[t]`, and `loss_mask[t]` tells us whether that
 prediction counts toward the loss.
+
+This shifted frame is worth drawing on paper. If the original sequence is `[A, B, C, D]`,
+the model sees `[A, B, C]` and predicts `[B, C, D]`. A mask value attached to original token
+`D` must move to the label position where `D` is predicted. If you instead use `m[:-1]`, you
+are asking whether the *input* token was assistant text, not whether the *target* token was
+assistant text.
 
 ### 2.2 Per-token cross-entropy
 
@@ -98,6 +114,11 @@ correct, and huge (goes to infinity) when the model is confident and wrong. It's
 surprise. We're training the model to minimize surprise on the assistant tokens we
 want it to produce.
 
+The logarithm makes the penalty additive over tokens. A sequence probability is a product of
+per-token probabilities; the negative log turns that product into a sum. That is why language
+modeling losses are usually reported as average negative log-likelihood per token and why
+perplexity is just the exponentiated version of that average.
+
 ### 2.3 Masked mean over the batch
 
 Summing across a batch of examples, indexed by `(b, t)`:
@@ -120,6 +141,11 @@ doesn't depend on how much padding happened to be in the batch. Padding tokens
 contribute zero to the numerator *and* zero to the denominator, so they don't pollute
 either side of the average.
 
+This denominator also makes batches comparable. Suppose one batch has short prompts and long
+answers, while another has long prompts and short answers. Dividing by valid assistant tokens
+means one unit of loss always means "average surprise per supervised assistant token." That
+is the number you actually care about.
+
 ---
 
 ## 3. Why mask the prompt?
@@ -133,6 +159,11 @@ generate user text. If we train on user tokens, the model wastes capacity memori
 human prompt phrasings, and worse, sometimes starts hallucinating "Human: ..." turns
 into its own output. This is the classic SFT failure mode where the model keeps
 inventing the other side of the conversation. Masking out user tokens prevents it.
+
+This is especially important with chat templates. The model should learn that after the
+assistant header it emits assistant content. It should not learn to continue by creating a
+new user message unless your application explicitly asks for a dialogue simulator. For an
+assistant, user text is conditioning information, not a target behavior.
 
 ### 3.2 The loss scale is dominated by the prompt
 
@@ -156,6 +187,10 @@ Exclude:
   template, not something the model needs to emit.
 - All user tokens: the content, and the user's `<|im_start|>user\n` and `<|im_end|>`.
 - Any padding.
+
+When unsure, ask: "At inference time, who is responsible for producing this token?" If the
+answer is "the caller" or "the formatting code", mask it out. If the answer is "the assistant
+model", include it. This rule resolves nearly every boundary case.
 
 ---
 
@@ -260,6 +295,12 @@ code-style:
 Read this out loud: **"the gradient is the model's predicted distribution minus a
 spike on the correct class."**
 
+That sentence is the core intuition. If the model assigns too much probability to a wrong
+token, that wrong token has a positive gradient, so gradient descent pushes its logit down.
+If the model assigns too little probability to the true token, the true token has a negative
+gradient, so gradient descent pushes its logit up. The update is local to the vocabulary
+distribution at that position, then the chain rule carries it backward through the transformer.
+
 Interpretation: the gradient subtracts probability mass from the true class and adds
 it to every other class, proportional to what the model currently predicts. A
 gradient *step* (minus this direction) pushes mass *toward* the correct class and
@@ -308,6 +349,11 @@ Recompute softmax with the new logits: $p \approx (0.154,\, 0.751,\, 0.095)$. Th
 model is now 75% sure about "dog", up from 63%. One gradient step moved us in the
 right direction, and the gradient told us *exactly how much* to move each logit.
 Do this for 100 million tokens and you've got a trained language model.
+
+The same arithmetic happens independently at every unmasked position in the batch. The only
+thing the transformer adds is parameter sharing: a change to one weight affects logits at many
+future examples and positions. Cross-entropy supplies the simple local signal; backpropagation
+decides how every parameter contributed to that signal.
 
 ### 4.5 With the mask
 
@@ -359,6 +405,11 @@ The implementation in three lines:
 labels. The point of this course is that you manage the mask explicitly. The
 `ignore_index` trick hides it from you, which is exactly where subtle bugs live.
 
+Explicit masking also makes diagnostics easier. You can print `loss_mask.sum()`, inspect
+masked NLL values, compare assistant-token loss to prompt-token loss, and write tests that
+flip masked labels. With `ignore_index`, much of that logic is implicit inside a library
+call.
+
 ### 5.2 Gradient check (Problem 2.2)
 
 Two tests:
@@ -386,6 +437,11 @@ Two tests:
 - `attention_mask` and `loss_mask` are different things. `attention_mask` tells the
   transformer where the real tokens are. `loss_mask` tells the loss which tokens
   count. Neither implies the other.
+
+A real assistant token has both `attention_mask = 1` and possibly `loss_mask = 1`. A real
+user token has `attention_mask = 1` and `loss_mask = 0`. Padding has `attention_mask = 0` and
+`loss_mask = 0`. Keeping those three cases separate prevents a lot of accidental reasoning
+like "masked out of the loss" means "invisible to the model"; it does not.
 
 ### 5.4 Training loop (Problem 2.4)
 
@@ -421,6 +477,12 @@ every 250 optimizer steps on a held-out split. Save `sft.pt` at the end.
 If your training loss plateaus above 3.0 after a few hundred steps, your mask is
 almost certainly wrong — you're either training on prompt tokens or masking out
 assistant tokens you shouldn't be.
+
+If the model generates plausible raw text but ignores the assistant role, suspect the data
+format. If the model learns to emit `<|im_end|>` immediately, inspect whether only closing
+markers are being supervised. If eval loss is much lower than train loss, check whether eval
+examples accidentally have fewer supervised tokens. The loss curve is only meaningful after
+the mask is trustworthy.
 
 ---
 
