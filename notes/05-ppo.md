@@ -99,6 +99,46 @@ through the reference or reward model, missing `torch.no_grad()` in rollout, or 
 logit tensors in the rollout buffer. Rollouts should store gathered log-probs, not
 vocabulary-sized distributions for every token.
 
+#### Worked example: a memory-budget walk-through
+
+Plug actual numbers into the rough count, for `gpt2-small` with the default
+PPO config (rollout batch 64, response len 256, n_embd 768).
+
+    weights, bf16, 4 models = 4 * 124e6 * 2 bytes = 992 MB
+    fp32 master copy of trainable params (124M policy + 769 value head)
+                            ≈ 124e6 * 4 bytes ≈ 496 MB
+    AdamW first moment, fp32 = 124e6 * 4 ≈ 496 MB
+    AdamW second moment, fp32 = 124e6 * 4 ≈ 496 MB
+    --- subtotal weights + optimizer state ≈ 2480 MB ≈ 2.5 GB
+
+    rollout buffers, fp32:
+      logprobs_old:  (64, 256)        =  16 384 floats ≈ 64 KB
+      values_old:    (64, 256)        =  16 384 floats ≈ 64 KB
+      ref_logprobs:  (64, 256)        =  16 384 floats ≈ 64 KB
+      advantages:    (64, 256)        =  16 384 floats ≈ 64 KB
+      returns:       (64, 256)        =  16 384 floats ≈ 64 KB
+      response_mask: (64, 256)        =  16 384 floats ≈ 64 KB
+      response_ids:  (64, 256), int64 =  16 384 longs  ≈ 128 KB
+    --- rollout buffers ≈ 0.5 MB total
+
+    activations under gradient checkpointing:
+      one trainable forward+backward at batch 4 micro, seq 512 ≈ 3-6 GB
+      depending on how many layer outputs you cache vs. recompute
+
+    CUDA workspace + cuBLAS scratch ≈ 1-2 GB
+
+    grand total ≈ 7-10 GB
+
+Two surprises worth noticing:
+
+- The rollout buffers are tiny next to the optimizer state. Storing a full
+  `(B, T, V)` logit tensor instead of a gathered `(B, T)` log-prob tensor would
+  add `64 * 256 * 50257 * 4 bytes ≈ 3.3 GB` per buffer. That is the bug the
+  shape hint above is meant to prevent.
+- Activations dominate the variable part of the budget. If you OOM, the
+  cheapest knob is shorter `response_len` or smaller per-step batch — both
+  cut activation memory linearly, while the optimizer-state line is fixed.
+
 ### 2.2 gpt2-medium (355M) is tight
 
 Weights and optimizer state both scale roughly linearly, so medium is about 3x
@@ -182,6 +222,51 @@ A fourth practical invariant: frozen models stay frozen. The reference and rewar
 should be in eval mode, under `torch.no_grad()`, and have `requires_grad_(False)`. Any
 optimizer parameter group that accidentally includes them is both a memory bug and an
 algorithm bug.
+
+#### Worked example: tensor shapes for one PPO iteration
+
+Concrete sizes for the default config (`B = 4` for the inner-loop micro-batch,
+prompt_len ≤ 64, response_len = 32, n_embd = 768, vocab = 50257). The rollout
+phase produces tensors at the *rollout* batch size (64); the inner loop slices
+them into the micro-batch size (4).
+
+```
+rollout phase, no grad:
+  prompts (left-padded):   (64,  64)            int64
+  response_ids:            (64,  32)            int64
+  attention_mask:          (64,  96)            bool        # prompt + response
+  response_mask:           (64,  32)            float32     # 1 on real response tokens
+  logprobs_old:            (64,  32)            float32     # gathered, not (B, T, V)
+  values_old:              (64,  32)            float32
+  ref_logprobs:            (64,  32)            float32
+  rm_rewards:              (64,)                float32     # one scalar per row
+  per_tok_r:               (64,  32)            float32
+  advantages:              (64,  32)            float32     # normalized
+  returns:                 (64,  32)            float32
+
+inner-loop micro-batch (4 rows):
+  mb.prompts:              (4,   64)            int64
+  mb.response_ids:         (4,   32)            int64
+  mb.logprobs_old:         (4,   32)            float32
+  mb.values_old:           (4,   32)            float32
+  mb.advantages:           (4,   32)            float32
+  mb.returns:              (4,   32)            float32
+  mb.mask:                 (4,   32)            float32
+
+  forward pass:
+    logits_new:            (4,   96, 50257)     bf16        # full sequence
+    logprobs_new:          (4,   32)            bf16        # gathered at response positions only
+    values_new:            (4,   96)            bf16        # then sliced to (4, 32)
+```
+
+Two things to verify in code:
+
+- `logprobs_old` and `logprobs_new` have the same shape `(mb_B, response_len)`,
+  not `(mb_B, prompt_len + response_len)`. Aligning prompt log-probs with
+  response log-probs is the most common off-by-one source.
+- `logits_new` has the full vocab dimension `(B, T, V)` *only* during the
+  forward pass; immediately gather to `(B, T)` and discard the big tensor
+  before backprop, otherwise activations balloon.
 
 ---
 
@@ -270,6 +355,45 @@ around 20%, grad norm stable, tokens/sec stable.
 When a run fails, change one knob at a time. PPO metrics are coupled: lowering LR can reduce
 KL, clip fraction, and reward growth all at once. If you change LR, beta, K, and response
 length together, you will not know which change helped.
+
+### 5.3 Worked example: healthy vs. reward-hacking log rows
+
+Two CSV rows, both real-shaped, both from the same training script. Read the
+columns top to bottom and decide what story each row is telling.
+
+**Healthy iteration (iter = 80):**
+
+```
+iter,  mean_rm_reward,  mean_kl_k3,  L_pi,    L_v,    entropy,  clip_fraction,  grad_norm,  tok/s,  resp_len
+80,    +0.42,           0.61,        -0.018,  0.143,  2.71,     0.18,           0.62,       1180,   91.4
+```
+
+Reward is climbing slowly. KL is small but positive (about 0.6 nats per
+response is well within the soft trust region for `beta = 0.02`). Policy loss
+hovers near zero, value loss is decreasing run-over-run, entropy is drifting
+down from the SFT baseline of around 3.0, clip fraction is in the healthy
+10–30% band, gradient norm is well under the clip threshold of 1.0, and
+tokens/sec is steady. Average response length has risen modestly.
+
+**Reward hacking (iter = 80, different run):**
+
+```
+iter,  mean_rm_reward,  mean_kl_k3,  L_pi,    L_v,    entropy,  clip_fraction,  grad_norm,  tok/s,  resp_len
+80,    +1.85,           4.20,        -0.105,  0.880,  1.42,     0.51,           1.00,       1170,   232.7
+```
+
+Reward has shot up four-fold. KL has crossed 4 nats per response and is
+trending up faster than reward. Entropy collapsed from ~2.7 to ~1.4. Clip
+fraction is over 50%, which means most tokens land outside `[1 - eps, 1 +
+eps]` per inner step. Gradient norm is pinned at the clip ceiling (1.0
+exactly), suggesting most batches saturate the clip. Average response length
+exploded from ~90 to ~233. This is the classic length-bias plus reward-hack
+pattern: the policy is producing long, high-reward, low-entropy answers that
+look nothing like SFT.
+
+The fix list, top to bottom: raise `beta` (0.02 → 0.06), then lower the
+policy learning rate by 3x, then check the RM for a length-vs-reward
+correlation on a held-out batch. Make one change per run.
 
 ---
 
