@@ -26,18 +26,18 @@ the behavior is piecewise: some tokens have ordinary policy-gradient signal, som
 gradient because the ratio is clipped, some value predictions use the unclipped branch, and
 some use the clipped branch. The tests are designed to force each case to happen.
 
-Plain-English version: PPO says "learn from this batch, but do not overlearn from it." A
-token with a positive advantage should become more likely, and a token with a negative
-advantage should become less likely. The clip is a guardrail that stops a single old rollout
-from pushing the policy too far before fresh samples are collected.
+PPO learns from a rollout batch while limiting how much that old batch can change the policy.
+A token with a positive advantage should become more likely, and a token with a negative
+advantage should become less likely. The clip prevents a single rollout from pushing the
+policy too far before fresh samples are collected.
 
 ---
 
 ## 1. Setup: importance-sampled policy gradient
 
-Before the equations, a plain-English sketch of PPO's one idea. Vanilla policy
-gradient says: sample a trajectory from the current policy, and nudge the
-parameters so the good actions become more likely. Two problems:
+Before the equations, here is PPO's core idea. Vanilla policy gradient samples a trajectory
+from the current policy, then nudges the parameters so the good actions become more likely.
+Two problems:
 
 1. Sampling trajectories is expensive — each one requires a full autoregressive
    generation of up to 256 tokens. We'd rather reuse each batch of samples for
@@ -152,9 +152,8 @@ where `N` is the count of masked-in response tokens.
 Read the `min` carefully: we take the **smaller** (more pessimistic) of the two
 surrogates, then *negate* the whole thing for the loss. Equivalently: inside the
 objective (before the negation), we take the *minimum* of `surr1` and `surr2`,
-i.e. the less favorable one. This is the key idea — the surrogate is set up so
-that the policy cannot be rewarded for running the ratio far outside
-`[1 - eps, 1 + eps]` in the direction of increasing the objective.
+i.e. the less favorable one. This setup prevents the policy from being rewarded for running
+the ratio far outside `[1 - eps, 1 + eps]` in the direction of increasing the objective.
 
 The negation is a common source of confusion. PPO papers usually describe maximizing the
 surrogate objective. PyTorch optimizers usually minimize a loss. This repo writes the loss as
@@ -177,15 +176,11 @@ $[0.8,\, 1.2]$. Pick two tokens:
   less likely. The clip does NOT fire here, because firing it would soften our
   response to a bad action we want to suppress.
 
-That asymmetry is the whole point: we are only "pessimistic" (clip to avoid big
-moves) when the policy would otherwise enjoy a reward for a move that has already
-gotten extreme. If the move is extreme in a *costly* direction, we let the
-gradient keep flowing.
-
-Said differently: PPO clips improvements that are too large, not mistakes that need fixing.
-For positive advantages, too-large improvement means the sampled token became much more
-likely. For negative advantages, too-large improvement means the sampled token became much
-less likely. The table below is just that sentence written out case by case.
+PPO is pessimistic only when the policy would otherwise get credit for a move that has
+already become extreme. If the move is extreme in a costly direction, the gradient keeps
+flowing. For positive advantages, an extreme improvement means the sampled token became much
+more likely. For negative advantages, an extreme improvement means the sampled token became
+much less likely. The table below writes out those cases.
 
 ### 2.2 What "pessimistic" means, case by case
 
@@ -250,10 +245,10 @@ Or in code-style:
 
 That token contributes zero signal to this gradient step.
 
-Zero signal does not mean the token is ignored forever. It means this particular rollout
-sample has already moved far enough in the advantage-improving direction for this inner-loop
-update. A future rollout may sample different tokens, compute different advantages, and
-produce fresh gradients.
+Zero signal applies only to this gradient step. This rollout sample has already moved far
+enough in the advantage-improving direction for the current inner-loop update. A future
+rollout may sample different tokens, compute different advantages, and produce fresh
+gradients.
 
 Verify this with an **edge test** in Problem 4.5. Set every ratio to a large
 value (say `rho = 5`) and `A > 0`. Every token should land in the "A > 0,
@@ -270,10 +265,9 @@ contribute zero to the gradient, so the effective magnitude of the update
 self-regulating trust region: small updates move freely, large ones get throttled
 automatically.
 
-Contrast with TRPO, PPO's predecessor: TRPO solves a hard constrained
-optimization at every step with conjugate-gradient. PPO gets comparable
-performance with `min(surr1, surr2)` and a standard optimizer. That simplicity is
-why everyone uses PPO.
+TRPO, PPO's predecessor, solves a hard constrained optimization at every step with
+conjugate-gradient. PPO gets comparable performance with `min(surr1, surr2)` and a standard
+optimizer, which is why it became the default practical choice.
 
 Clip fraction is therefore both a diagnostic and a control signal. Near 0% can mean updates
 are tiny or the policy is barely learning. Near 80% means the optimizer is trying to move far

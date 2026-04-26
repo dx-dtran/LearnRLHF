@@ -19,12 +19,11 @@ called `advantages` that PPO can optimize." If the advantage estimates are wrong
 loss will confidently push tokens in the wrong direction. That is why GAE gets its own note
 and its own tests.
 
-Beginner's guide picture: PPO is trying to answer one question for every generated token:
-"Should this exact token become more likely next time, or less likely?" The advantage is the
-number that answers that question. Positive advantage means "this token helped more than we
-expected." Negative advantage means "this token was worse than expected." GAE is the
-bookkeeping method that turns delayed rewards, value predictions, and masks into those
-per-token answers.
+For every generated token, PPO needs to decide whether that exact token should become more
+likely next time. The advantage supplies the answer. Positive advantage means the token led
+to a better outcome than expected. Negative advantage means the token led to a worse outcome
+than expected. GAE turns delayed rewards, value predictions, and masks into those per-token
+signals.
 
 ---
 
@@ -57,10 +56,9 @@ $\gamma$ is a discount factor in $[0, 1]$. For text RL we use $\gamma = 1$ — e
 are short, and we want credit assignment to flow across the entire response without
 the exponential dampening that $\gamma < 1$ would give.
 
-Using $\gamma = 1$ does not mean every token receives equal blame or credit. The GAE
-parameter $\lambda$ and the value baseline still control how the terminal reward is spread
-backward. It only means we are not deliberately discounting later text because it occurs later
-in the response.
+With $\gamma = 1$, later text is not discounted merely because it appears later in the
+response. Credit assignment still depends on the GAE parameter $\lambda$ and the value
+baseline.
 
 ### 1.1 A concrete rollout
 
@@ -89,10 +87,9 @@ That's one rollout. An iteration of PPO generates a batch of many such rollouts
 in parallel. Every quantity in the rest of this note is defined on these
 per-token tuples $(s_t, a_t, r_t)$.
 
-Notice that the "environment" transition is simple for text: append the sampled token. The
-difficulty is not environment dynamics; it is credit assignment. A good final answer may
-depend on many earlier tokens, and a bad answer can be caused by one early commitment that
-made the rest of the response hard to recover.
+For text, the environment transition is simple: append the sampled token. The difficult part
+is credit assignment. A good final answer may depend on many earlier tokens, and a bad answer
+can be caused by one early commitment that made the rest of the response hard to recover.
 
 ---
 
@@ -151,10 +148,10 @@ $$
 \nabla_\theta f = f \cdot \nabla_\theta \log f
 $$
 
-This is just the chain rule for $\log$: $\nabla_\theta \log f = (1/f) \cdot
-\nabla_\theta f$, so multiply both sides by $f$. The reason we use this trick:
-we want gradients to appear as expectations (sums of $f \cdot \text{something}$)
-so we can estimate them by averaging over samples. The log-derivative trick is
+This follows from the chain rule for $\log$: $\nabla_\theta \log f = (1/f) \cdot
+\nabla_\theta f$, so multiply both sides by $f$. We use this trick because we want gradients
+to appear as expectations (sums of $f \cdot \text{something}$) that can be estimated by
+averaging over samples. The log-derivative trick is
 the standard move for converting "gradient of a probability" into "probability
 times gradient of log-probability".
 
@@ -201,12 +198,12 @@ future went well (`G_hat_t > 0`), and *less likely* if the future went badly. Th
 size of the nudge is proportional to how much better or worse than zero the future
 was.
 
-That's it. That's the policy gradient. It's intuitive and correct.
-
-**But**: Monte Carlo returns `G_hat_t` are *very noisy*. A single trajectory's
-cumulative reward depends on many sampled tokens' worth of randomness. So even if
-our policy is good, the gradient estimate has huge variance. Lowering that variance
-without introducing bias is the whole game from here on.
+That is the policy gradient: increase the probability of sampled actions when the future was
+better than expected, and decrease it when the future was worse. Monte Carlo returns
+`G_hat_t` are *very noisy*, though. A single trajectory's cumulative reward depends on many
+sampled tokens' worth of randomness. Even with a good policy, the gradient estimate can have
+huge variance. The rest of this note is about lowering that variance without introducing
+bias.
 
 For language, the variance problem is severe. A response may get one terminal RM score, but
 hundreds of sampled token decisions contributed to that score. If every token receives the
@@ -369,7 +366,7 @@ smoothly between these choices.
 
 This is the central bias-variance tradeoff in value-based credit assignment. Trust the value
 function too much and you inherit its bias. Trust sampled returns too much and you inherit
-their noise. GAE does not eliminate the tradeoff; it gives you a practical dial.
+their noise. GAE gives you a practical dial for choosing where to sit between those errors.
 
 ---
 
@@ -426,10 +423,9 @@ by convention and $A_T = 0$.
 This recursion runs *backwards* through time, from `T-1` down to `0`, and that's
 how we compute it in code.
 
-The backward loop is not just an implementation convenience. It mirrors the recursion:
-`A[t]` depends on `A[t+1]`, so the future advantage must already be known. In vectorized code
-you can get fancy, but the Python backward loop is clearer and fast enough for the small
-response lengths in this repo.
+The backward loop mirrors the recursion: `A[t]` depends on `A[t+1]`, so the future advantage
+must already be known. Vectorized versions exist, but the Python backward loop is clearer and
+fast enough for the small response lengths in this repo.
 
 ### 5.3 Algorithm
 

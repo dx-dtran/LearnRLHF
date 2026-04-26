@@ -6,23 +6,17 @@ Read this *before* you write `data_hh.py` (Problem 0.2). It's a data contract, n
 derivation. You're not doing math here — you're figuring out what the dataset looks like,
 what you need to produce from it, and how to format everything consistently.
 
-Think of this note as the map between "messy real text on disk" and "clean tensors the
-training code can trust". Every later module assumes that this map is correct. SFT assumes
-that assistant tokens are marked correctly. The reward model assumes that chosen and rejected
-responses are paired with the right prompt. PPO assumes that prompt-only examples end exactly
-where generation should begin. If any of those assumptions are wrong, the model can still
-train, but it will train on the wrong problem.
+Think of this note as the map between raw conversation strings and tensors the training code
+can trust. Every later module depends on this map. SFT needs assistant tokens marked
+correctly. The reward model needs chosen and rejected responses paired with the right prompt.
+PPO needs prompt-only examples to end exactly where generation should begin. If those
+boundaries are wrong, the model can train for hours while solving the wrong problem.
 
-The job in Module 0 is therefore not just "download a dataset". It is to understand the
-shape of the data well enough that, when a tensor looks suspicious three modules later, you
-can trace it back to the raw HH row and know what it was supposed to mean.
-
-Plain-English version: this module teaches you what the examples *mean* before you turn
-them into tensors. The rest of RLHF can feel abstract, but the data problem is very
-concrete. A row contains two possible assistant endings. A human preferred one. Your code
-has to preserve exactly that comparison while also producing the three views needed by SFT,
-RM, and PPO. If the views disagree about where the prompt ends or where the assistant answer
-begins, the later math will be correct on the wrong data.
+Module 0 is about understanding what each example means before tokenization. A row contains
+two possible assistant endings, one preferred by a human. Your code has to preserve that
+comparison while also producing the three views needed by SFT, RM, and PPO. When a tensor
+looks suspicious three modules later, you should be able to trace it back to the raw HH row
+and know what it was supposed to represent.
 
 ---
 
@@ -38,10 +32,10 @@ one ending was picked by a human labeler as "better", and the other was not. The
 one is called **chosen** and the other is called **rejected**.
 
 That word "better" is deliberately vague. It can mean more helpful, more harmless, more
-truthful, less evasive, better formatted, or simply more satisfying to the labeler. The reward
-model will not receive a clean decomposition of those reasons. It only sees the pairwise
-outcome: chosen beat rejected. This is why the reward model is a preference model rather
-than a supervised classifier with an absolute target score.
+truthful, less evasive, better formatted, or more satisfying to the labeler. The reward model
+receives no clean decomposition of those reasons. It sees the pairwise outcome: chosen beat
+rejected. This is why the reward model is a preference model rather than a supervised
+classifier with an absolute target score.
 
 Here is what a raw row looks like:
 
@@ -154,11 +148,11 @@ This mask is the thing that breaks most often in an SFT implementation. We go de
 on it in `02-sft.md`. Downstream, RM and PPO both assume this mask is correct, so
 getting it right here matters a lot.
 
-A useful way to say the rule: "the model is graded only on tokens that the assistant would
-have had to type." The assistant would not type the user header. It would not type the user's
-message. It also would not type the assistant header if your inference code supplies that
-header before generation. It *would* type the assistant content and the closing marker that
-tells generation to stop. That distinction is the whole SFT data problem.
+The rule is: "the model is graded only on tokens that the assistant would have had to type."
+The assistant would not type the user header, the user's message, or the assistant header if
+your inference code supplies that header before generation. It *would* type the assistant
+content and the closing marker that tells generation to stop. That boundary is the core SFT
+data problem.
 
 ### 3.2 Preference dataset (for the reward model)
 

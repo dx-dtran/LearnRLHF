@@ -17,12 +17,12 @@ all pass gradient checks and the full PPO run can still fail because tensors are
 models are in the wrong mode, or logging hides the first sign of instability. Read this note
 as an execution checklist as much as a theory note.
 
-At a beginner level, one PPO iteration is: ask the current model to answer prompts, grade
-those answers with the reward model, compare the current model to the frozen SFT reference,
-turn those scores into advantages, then take a few cautious optimizer steps. The hard part is
-not the loop shape. The hard part is making sure every tensor is from the correct moment in
-time: old log-probs from rollout, new log-probs from the current minibatch, frozen reference
-log-probs from the SFT copy, and detached advantages from the rollout calculation.
+One PPO iteration asks the current model to answer prompts, grades those answers with the
+reward model, compares the current model to the frozen SFT reference, turns those scores into
+advantages, and takes a few cautious optimizer steps. The loop is straightforward; the tensor
+timestamps are the hazard. Old log-probs come from rollout, new log-probs come from the
+current minibatch, reference log-probs come from the frozen SFT copy, and advantages come
+detached from the rollout calculation.
 
 ---
 

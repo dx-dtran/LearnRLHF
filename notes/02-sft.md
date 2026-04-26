@@ -19,11 +19,10 @@ state the tensor contract before writing the code. For SFT, the contract is "log
 the next token, labels are shifted by one, and the mask is attached to the token being
 predicted." Almost every bug in this module is a violation of one of those three clauses.
 
-If you compare this to ordinary supervised learning, SFT is just "show the model examples of
-good assistant behavior and grade only the assistant parts." The prompt is like the question
-on an exam. The response is the student's answer. We do not grade the student for reproducing
-the question; we grade the answer. The `loss_mask` is the grading rubric that says which
-tokens count.
+SFT is ordinary supervised learning with a careful grading rule: show the model examples of
+good assistant behavior, and count loss only on the assistant parts. The prompt is the exam
+question. The response is the student's answer. The `loss_mask` is the grading rubric that
+says which tokens count.
 
 ---
 
@@ -42,10 +41,10 @@ The mental model: the model sees the entire dialogue, but during training we onl
 context, but we never ask it "predict the next user token" — user text is input,
 assistant text is the target.
 
-Another way to say this: SFT changes the *data distribution* and the *mask*, not the basic
-language-modeling machinery. The transformer still produces one vocabulary distribution per
-position. The loss still asks for high probability on the next token. The only question is
-which next-token predictions are educational for the behavior we want.
+SFT changes the *data distribution* and the *mask*. The language-modeling machinery stays the
+same: the transformer still produces one vocabulary distribution per position, and the loss
+still asks for high probability on the next token. The mask decides which predictions teach
+the behavior we want.
 
 ---
 

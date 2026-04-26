@@ -89,10 +89,10 @@ is reported as a KL number, and we can put a price on that movement. The
 optimization then decides, at every token, whether chasing extra reward is worth
 the KL cost.
 
-This is not saying the SFT model is perfect. It is saying the SFT model is the region where
-the reward model has the best chance of being meaningful. If PPO wanders into bizarre text
-that the RM never saw during training, a high reward score is no longer evidence of a good
-answer. KL keeps the search local enough that the reward signal remains usable.
+The SFT model gives PPO a region where the reward model has the best chance of being
+meaningful. If PPO wanders into bizarre text that the RM never saw during training, a high
+reward score is no longer evidence of a good answer. KL keeps the search local enough that
+the reward signal remains usable.
 
 ---
 
@@ -134,7 +134,7 @@ Two different ways to understand this penalty, both true:
 
 Freezing the reference is essential. If the reference moved with the policy, the KL penalty
 would chase a moving target and stop measuring distance from the original supervised model.
-The whole point is to keep one stable anchor while the policy learns.
+The frozen reference gives the policy one stable anchor during learning.
 
 ---
 
@@ -290,10 +290,9 @@ Or in code-style:
 - **Lower variance than $k_1$** in practice: the inverse-ratio correction pulls extreme
   log-ratio samples back toward a more stable nonnegative diagnostic.
 
-A quick geometric picture: `k_1` is just the raw log-ratio of whatever token you
-happened to draw. `k_3` adds a correction that is zero in expectation but makes each sample
-nonnegative, so the plot behaves like a distance-from-reference diagnostic instead of a noisy
-signed signal.
+Geometrically, `k_1` is the raw log-ratio of the sampled token. `k_3` adds a correction that
+is zero in expectation but makes each sample nonnegative, so the plot behaves like a
+distance-from-reference diagnostic instead of a noisy signed signal.
 
 Be careful about conventions when reading other PPO code or Schulman's blog posts. Some
 definitions use a ratio `p/q`, others use `q/p`, depending on which distribution produced the
