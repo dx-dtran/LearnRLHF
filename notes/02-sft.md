@@ -162,8 +162,8 @@ Two big reasons.
 At inference time, **we** write the user's message — the model never has to
 generate user text. If we train on user tokens, the model wastes capacity memorizing
 human prompt phrasings, and worse, sometimes starts hallucinating "Human: ..." turns
-into its own output. This is the classic SFT failure mode where the model keeps
-inventing the other side of the conversation. Masking out user tokens prevents it.
+into its own output. The model learns to keep producing the other side of the conversation
+instead of stopping after one turn. Masking out user tokens prevents it.
 
 This is especially important with chat templates. The model should learn that after the
 assistant header it emits assistant content. It should not learn to continue by creating a
@@ -383,6 +383,129 @@ Three things worth noticing:
   scalars.
 - This is the gradient that flows from the loss into the `lm_head` and then
   backpropagates through the rest of the transformer.
+
+### 4.6 Worked example: end-to-end masked CE on a chat template
+
+Pick up the toy vocab from `00-data.md` and walk one example all the way through.
+The original (unshifted) tokens for the chosen dialogue were:
+
+```
+pos:        0   1   2   3   4   5   6   7   8   9
+input_id:  10  11  12  13  14  15  16  17  18  15
+piece:      U   W   I   2   ?  /U   A   4   .  /A
+mask m:     0   0   0   0   0   0   0   1   1   1
+```
+
+Now shift to the predict-next frame:
+
+```
+shifted pos:  0   1   2   3   4   5   6   7   8
+input_id:    10  11  12  13  14  15  16  17  18      # x[:-1]
+labels:      11  12  13  14  15  16  17  18  15      # x[1:]
+loss_mask:    0   0   0   0   0   0   1   1   1      # m[1:]
+```
+
+Three loss-mask positions: 6 predicts `17` (the assistant content `4`), 7 predicts
+`18` (the assistant content `.`), 8 predicts `15` (the closing `<|im_end|>`).
+
+Imagine the model produces these logits at each position over a vocab of size 4
+restricted to the relevant ids `{15, 16, 17, 18}`:
+
+```
+shifted pos:  6           7           8
+              for `4`:     for `.`:    for `</A>`:
+target:      17          18          15
+logits[15]:  -1.0        -1.0         2.0
+logits[16]:   0.0         0.0         0.0
+logits[17]:   2.0         0.0        -1.0
+logits[18]:   0.0         2.0         0.0
+```
+
+Per-position softmax probabilities (rounding to 3 figures):
+
+```
+pos 6:  p[15]=0.034  p[16]=0.094  p[17]=0.690  p[18]=0.094
+pos 7:  p[15]=0.034  p[16]=0.094  p[17]=0.094  p[18]=0.690
+pos 8:  p[15]=0.690  p[16]=0.094  p[17]=0.034  p[18]=0.094
+```
+
+Per-position cross-entropy at the supervised positions:
+
+```
+ell[6] = -log(0.690) ≈ 0.371      # target 17
+ell[7] = -log(0.690) ≈ 0.371      # target 18
+ell[8] = -log(0.690) ≈ 0.371      # target 15
+```
+
+`N_resp = sum(loss_mask) = 3`, so:
+
+```
+L_SFT = (0 + 0 + 0 + 0 + 0 + 0 + 0.371 + 0.371 + 0.371) / 3 ≈ 0.371
+```
+
+The unsupervised positions (0..5) contribute zero to the numerator and zero to the
+denominator. Whatever the model thinks about how to predict user tokens does not
+affect this loss.
+
+### 4.7 Worked example: flipping a masked label
+
+Same setup. Change `labels[2]` from `13` (toy id for `2+2`) to some random other
+token id, say `99`. That position has `loss_mask[2] = 0`, so:
+
+- `ell[2]` is computed as `-log p[2, 99]` instead of `-log p[2, 13]`.
+- The product `loss_mask[2] * ell[2]` is `0 * (anything) = 0`.
+- The numerator sum is unchanged. The denominator sum is unchanged.
+
+Result: `L_SFT ≈ 0.371`, identical. This is exactly what the unit test in Problem
+2.2 asserts. Try the flip in code, compute `(loss - loss_orig).abs().max()`, and the
+answer should be machine-zero.
+
+If the test fails, the most common cause is that the implementation accidentally
+divides by the unmasked count (`B * T`) instead of the mask sum, in which case the
+denominator changes when the labels do. Another cause is using `ignore_index=-100`
+elsewhere in the codepath, which lets framework code reinterpret labels and drift
+away from the explicit mask.
+
+### 4.8 Worked example: per-batch versus per-sequence denominator
+
+Two sequences in one batch. Lengths after shifting: 4 and 6. Loss masks (the part
+that supervises assistant content):
+
+```
+row 0:  loss_mask = [0, 0, 1, 1]                 # 2 supervised tokens
+row 1:  loss_mask = [0, 0, 0, 0, 1, 1]           # 2 supervised tokens
+
+per-token ell (already computed):
+row 0:  [_, _, 1.0, 0.5]
+row 1:  [_, _, _, _, 2.0, 1.0]
+```
+
+(Underscores are positions where `loss_mask = 0`. Their ell values do not matter.)
+
+Two ways to average:
+
+**Per-sequence then mean over rows.**
+
+    row 0 mean = (1.0 + 0.5) / 2 = 0.75
+    row 1 mean = (2.0 + 1.0) / 2 = 1.50
+    batch loss = (0.75 + 1.50) / 2 = 1.125
+
+**Per-batch (the InstructGPT convention).**
+
+    numerator   = 1.0 + 0.5 + 2.0 + 1.0 = 4.5
+    denominator = 2 + 2 = 4
+    batch loss  = 4.5 / 4 = 1.125
+
+Same answer here because both rows happen to have the same supervised count. Now
+imagine row 0's supervised count rises to 8 with most ells near zero, while row 1
+keeps its 2 ells near 1.5. Per-sequence averaging would give equal weight to both
+rows even though one has 4x more tokens; per-batch averaging weights each
+supervised token equally. Per-batch is what we want, because the model's
+representations are updated per-token, not per-row.
+
+Padding contributes 0 to the numerator (because `loss_mask = 0`) and 0 to the
+denominator. It is invisible to either calculation. The per-batch form is therefore
+robust to the shape of the batch.
 
 ---
 

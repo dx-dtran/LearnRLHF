@@ -47,9 +47,9 @@ Here is what a raw row looks like:
 ```
 
 Both strings are the full dialogue, including all earlier turns. Usually only the final
-assistant turn differs between chosen and rejected, but not always — in principle the
-conversations could diverge earlier. Treat them as two full trajectories, not as
-"one prompt with two possible endings".
+assistant turn differs between chosen and rejected, but in principle the conversations
+could diverge earlier. The safe mental model is two full trajectories that happen to share
+a prefix.
 
 For the teaching implementation, we still usually *extract* a shared prompt and two candidate
 responses. But while doing that extraction, keep the raw fact in mind: the dataset does not
@@ -123,6 +123,92 @@ main line. Literal tags are verbose but transparent.
 We write the roles as `user` and `assistant`. The raw HH data uses `Human:` and
 `Assistant:` instead, so part of your formatter's job is to translate `Human:` → `user`
 and `Assistant:` → `assistant` while wrapping everything in the ChatML tags.
+
+### Worked example: raw HH row to chat-formatted string
+
+Pretend the raw HH row is short:
+
+```json
+{
+  "chosen":   "\n\nHuman: What is 2+2?\n\nAssistant: 4.",
+  "rejected": "\n\nHuman: What is 2+2?\n\nAssistant: I'm not sure."
+}
+```
+
+After your formatter applies the ChatML template, the `chosen` side becomes:
+
+```
+<|im_start|>user
+What is 2+2?<|im_end|>
+<|im_start|>assistant
+4.<|im_end|>
+```
+
+The `rejected` side becomes:
+
+```
+<|im_start|>user
+What is 2+2?<|im_end|>
+<|im_start|>assistant
+I'm not sure.<|im_end|>
+```
+
+Both share the prompt prefix up through the second `<|im_start|>assistant\n`. From this
+point on, the SFT dataset will use the chosen string, the RM will use both, and the PPO
+prompt-only dataset will keep just the prefix.
+
+### Worked example: tokens and loss_mask alignment
+
+The full BPE expansion of the chat template is verbose (each `<|im_start|>` literal
+splits into about half a dozen subwords). To make the structure visible, this note uses
+a tiny printed vocab with one token per logical piece. The *real* code uses the actual
+GPT-2 BPE; the alignment rule is the same.
+
+```
+toy vocab:
+   0: <pad>
+  10: <|im_start|>user\n
+  11: What
+  12: is
+  13: 2+2
+  14: ?
+  15: <|im_end|>
+  16: <|im_start|>assistant\n
+  17: 4
+  18: .
+```
+
+The chat-formatted `chosen` string tokenizes to:
+
+```
+pos:        0   1   2   3   4   5   6   7   8
+input_id:  10  11  12  13  14  15  16  17  18  15
+                                                ^
+                                                pos 9: closing <|im_end|>
+```
+
+Now the SFT mask. The rule from §3.1 is "1 only on assistant content, including the
+trailing `<|im_end|>`." Apply it position-by-position:
+
+```
+pos:         0   1   2   3   4   5   6   7   8   9
+input_id:   10  11  12  13  14  15  16  17  18  15
+piece:       U   W   I   2   ?  /U   A   4   .  /A
+loss_mask:   0   0   0   0   0   0   0   1   1   1
+```
+
+Legend: `U` = user header, `W/I/2/?` = user content, `/U` = user closing `<|im_end|>`,
+`A` = assistant header, `4/.` = assistant content, `/A` = assistant closing `<|im_end|>`.
+
+Two things to verify when staring at this:
+
+- The assistant header at position 6 (`<|im_start|>assistant\n`) is `mask = 0`. Your
+  inference code emits that token; the model never has to predict it.
+- The assistant's closing `<|im_end|>` at position 9 is `mask = 1`. The model must
+  learn when to stop, which means it must learn to emit that closing token.
+
+Module 2 (`02-sft.md`) revisits the same example after the shift to the predict-next
+frame, where the mask attaches to the *target* token rather than the *input* token.
 
 ---
 

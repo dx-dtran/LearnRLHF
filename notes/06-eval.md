@@ -11,15 +11,15 @@ at this stage — the theory is all behind you. This note is about:
 
 Fill this file in with your actual outputs as you run the problems.
 
-Evaluation is where you stop optimizing proxies and look at behavior. Training loss, reward
-model score, KL, and win-rate are all useful, but none of them substitutes for reading the
-model's answers. The final question is not "did a scalar improve?" It is "does this assistant
-follow instructions better in ways a human can recognize?"
+Evaluation is where you stop optimizing proxies and read what the model actually says.
+Training loss, reward model score, KL, and win-rate are useful, but none of them substitutes
+for the question a human cares about: does this assistant follow instructions better than
+the previous version?
 
-Read evaluation by looking at behavior, not only metrics. Base GPT-2 should reveal why
-instruction tuning is needed. SFT should show what imitation buys you. RLHF should show
-whether optimizing the learned preference signal improved answers beyond imitation or mostly
-changed their style. The side-by-side table is where those differences become visible.
+Base GPT-2 should reveal why instruction tuning is needed. SFT should show what imitation
+buys. RLHF should show whether optimizing the learned preference signal improved answers
+beyond imitation or mostly changed their style. The side-by-side table is where those
+differences become visible.
 
 ---
 
@@ -60,9 +60,9 @@ For a more deterministic comparison you can also generate with temperature 0
 (greedy). More boring to read, but removes all sampling noise so the differences
 are fully attributable to the model weights.
 
-A good practice is to run both: greedy for a clean model-to-model comparison, and sampled
-generation for a more realistic view of behavior. Greedy outputs can hide diversity problems;
-sampled outputs can hide regressions behind randomness. Together they give a better picture.
+Running both is useful: greedy for a clean model-to-model comparison, sampled generation
+for a more realistic view of behavior. Greedy outputs can hide diversity problems. Sampled
+outputs can hide regressions behind randomness. Together they give a better picture.
 
 ### 1.3 Format
 
@@ -76,9 +76,43 @@ A markdown table like:
 
 Paste it under a "Results" section in this file.
 
-When the table is large, readability matters. Trim extremely long responses, but do not trim
-away the failure. If a model rambles, show enough rambling that the failure mode is visible.
-If a model never emits `<|im_end|>`, note that explicitly.
+### 1.4 Worked example: a 5-row toy table
+
+What the table should look like, with hand-written outputs that illustrate the kinds
+of differences you should be looking for. These are not real generations — they are
+caricatures of the failure modes each model tends to show.
+
+```
+| # | Prompt                              | Base                                                      | SFT                                            | RLHF                                       |
+|---|-------------------------------------|-----------------------------------------------------------|------------------------------------------------|--------------------------------------------|
+| 1 | What is 2+2?                        | What is 2+2? What is 3+3? What is 4+4? ...                | 4.                                             | 4.                                         |
+| 2 | Capital of Kenya?                   | The capital of Kenya is a country in East Africa...       | The capital of Kenya is Nairobi.               | Nairobi.                                   |
+| 3 | List 3 prime numbers.               | Prime numbers are numbers that are only divisible by ...  | 1. 2  2. 3  3. 5                               | 2, 3, 5.                                   |
+| 4 | I feel anxious about a deadline.    | Human: I also feel anxious. Assistant: Me too. Human: ... | I'm sorry to hear that. Try breaking it down.  | That sounds stressful. Two things help...  |
+| 5 | Write a JSON object with one key.   | { "key": "value", "key2": "value2", "key3": ...           | { "key": "value" }                             | { "key": "value" }                         |
+```
+
+What to read out of this:
+
+- **Row 1**: base loops; SFT and RLHF answer once. SFT and RLHF agree.
+- **Row 2**: base rambles around the answer; SFT answers in a full sentence; RLHF
+  is more concise. Concise is not always better — it depends on the prompt.
+- **Row 3**: SFT picked up a numbered-list pattern from training. RLHF often
+  prefers shorter formats because they are slightly higher reward on average.
+- **Row 4**: base hallucinates a multi-turn dialogue (the classic SFT-fixes-it
+  failure mode). SFT and RLHF stay in role.
+- **Row 5**: format-sensitive. Base often fails to terminate JSON. SFT and RLHF
+  emit valid JSON. Watch for RLHF that adds polite preamble before the JSON; that
+  is a common reward-hacking pattern that breaks downstream parsing.
+
+If your real table looks nothing like this — for example, RLHF rambles like base, or
+SFT and RLHF are indistinguishable on every prompt — that is information. RLHF that
+mirrors SFT means the policy did not move; RLHF that mirrors base means the policy
+moved away from SFT in the wrong direction.
+
+Trim extremely long responses, but do not trim away the failure. If a model rambles, show
+enough rambling that the failure mode is visible. If a model never emits `<|im_end|>`, note
+that explicitly.
 
 ---
 
@@ -118,10 +152,9 @@ SFT and the run failed. Likely reasons:
 - Too few PPO iterations.
 - Reward hacking that isn't visible on these particular prompts.
 
-Treat 20 prompts as a smoke test, not a publication-grade benchmark. A 55% win-rate on 20
-items is only a weak signal, but it is enough to catch obvious regressions and to force
-manual inspection. If you want stronger evidence, increase the prompt count and keep the
-annotation protocol blinded.
+Treat 20 prompts as a smoke test. A 55% win-rate on 20 items is a weak signal, enough to
+catch obvious regressions and force manual inspection. For stronger evidence, increase the
+prompt count and keep the annotation protocol blinded.
 
 ### 2.4 If RLHF didn't win
 
@@ -133,9 +166,43 @@ Don't paper over it. Write down honestly:
 
 Then actually change it and try again, if you want to.
 
-The most useful failed evaluation is specific. "RLHF lost" is not specific. "RLHF gives
-longer answers that score well but ignore requested JSON formatting" is specific, and it
-points toward checking reward length bias and format-sensitive prompts.
+"RLHF lost" tells you nothing. "RLHF gives longer answers that score well but ignore
+requested JSON formatting" points you straight at checking reward length bias and
+format-sensitive prompts. Make the failed evaluation specific.
+
+### 2.5 Worked example: a 20-row tally
+
+A filled-in tally for 20 prompts where RLHF wins with margin to spare. Each row
+records your blinded judgement after both passes (forward and reversed order) have
+been collected and reconciled.
+
+```
+prompt:  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20
+result:  R  R  T  R  S  R  R  T  R  R  S  R  R  R  T  R  S  R  R  R
+```
+
+Counts: `R` (RLHF win) = 13, `T` (tie) = 3, `S` (SFT win) = 4. Plug into the formula:
+
+    win_rate_RLHF = (13 + 0.5 * 3) / 20 = 14.5 / 20 = 0.725
+
+That clears the 0.55 target. Now do the diagnostic pass: read every row where SFT won
+and look for a pattern. In this hypothetical, three of the four SFT wins were prompts
+that asked for a list, and on those rows the RLHF response was shorter and dropped one
+required item. That is information: your RLHF policy may be over-compressing list
+outputs, possibly because the RM has a slight bias against long responses on chatty
+prompts. Note this in `notes/06-eval.md` and either accept it, raise `beta`, or
+retrain the RM with explicit length-balanced pairs.
+
+A second hypothetical, less rosy:
+
+```
+prompt:  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20
+result:  R  S  T  S  S  R  T  S  R  S  R  S  T  S  R  S  S  T  S  R
+```
+
+Counts: `R` = 5, `T` = 4, `S` = 11. Win rate = `(5 + 2) / 20 = 0.35`. RLHF lost. Read
+section 2.4 of this note again, then start with the most likely cause for your run
+(usually too-large `beta`, weak RM, or too few PPO outer iterations).
 
 ---
 
@@ -143,9 +210,9 @@ points toward checking reward length bias and format-sensitive prompts.
 
 One page, answering these six questions directly.
 
-The retrospective should be technical, not sentimental. Name the bug, the symptom, the test
-that caught it, and the fix. The point is to make the next RLHF implementation easier because
-you have a written catalog of failure modes.
+Keep the retrospective technical. Name the bug, the symptom, the test that caught it, and the
+fix. The point is to make the next RLHF implementation easier because you have a written
+catalog of failure modes.
 
 ### 3.1 What was the hardest part?
 
@@ -160,9 +227,8 @@ Count your commits and your notes. The gap between "how hard I thought it would
 be" and "how long it actually took" is diagnostic. Almost always, the answer
 reveals where your mental model was the weakest.
 
-This is worth writing down because time spent is a better teacher than confidence. If a
-concept felt easy but consumed two days, that concept deserves another derivation or a better
-unit test.
+Time spent is a better teacher than confidence. If a concept felt easy but consumed two days,
+that concept deserves another derivation or a better unit test.
 
 ### 3.3 Which gradient check saved you?
 
@@ -192,13 +258,50 @@ appear when you build RLHF from scratch, and how you learned to catch them.
 
 ### 3.6 What did you not understand before, and what do you understand now?
 
-Pick one thing. Write two paragraphs. "I used to think X; now I think Y." If you
-can't think of one, you didn't learn anything and you should redo the course.
-But you *will* find one.
+Pick one thing. Write two paragraphs in the form "I used to think X; now I think Y." If you
+can't find one, redo the course. But you *will* find one.
 
 Good examples are concrete: "I used to think PPO clipping just limited ratios; now I
 understand it clips only advantage-improving moves." Or: "I used to think masking was a
 data-loader detail; now I understand it defines the actual supervised objective."
+
+### 3.7 Worked example: a filled retrospective
+
+Use this as a calibration target for the level of specificity expected. The numbers
+and bugs below are illustrative, not from a real run.
+
+> **Hardest part.** Aligning `logprobs_old` and `logprobs_new` in the PPO inner loop.
+> The shift between input positions and predicted-next-token positions is one offset;
+> the shift between prompt+response tokens and response-only positions is another.
+> I had to draw both alignments on paper before the per-token KL plot stopped looking
+> like garbage.
+>
+> **Where I actually spent the most time.** The reward model. Pairwise accuracy was
+> stuck at 53% for three days. The cause was a tokenizer mismatch: the chat template
+> in `data_hh.py` was using literal `<|im_end|>` text but the RM dataloader had been
+> ported from an earlier version that stripped trailing whitespace, so the last-token
+> index pointed one position too far left. After fixing it, accuracy jumped to 67%
+> in the next training run.
+>
+> **Gradient check that saved me.** The "flip a masked token, loss unchanged" test in
+> `tests/test_grad_sft.py`. It caught a bug where the SFT mask was being applied to
+> `input_ids` instead of `labels`, which meant the model was being graded on the
+> token *before* the assistant content. Loss numbers looked sensible; generations
+> were nonsensical until I fixed it.
+>
+> **What I would do differently.** Initialize the value head from a small random
+> normal instead of zeros. Zero-init meant the first 50 PPO iterations had near-zero
+> advantages, which slowed early learning more than I expected.
+>
+> **What I got wrong and fixed.** (1) SFT mask off by one — see above. (2) GAE
+> applied without `nonterm` mask on padded rows, which leaked future reward across
+> rows that finished early. (3) Used `min` where the value loss needed `max`,
+> caught by the gradient-check on the clipped branch.
+>
+> **What I understand now that I did not before.** "I used to think PPO's clip was
+> a regularizer; now I think of it as a piecewise gradient that turns off whenever
+> firing it would soften a self-correcting move. The clip is asymmetric in a way
+> that only makes sense once you write the per-token gradient table by hand."
 
 ---
 
@@ -208,9 +311,8 @@ data-loader detail; now I understand it defines the actual supervised objective.
 - The 20-row win-rate tally from 6.2 with your scoring notes.
 - The retrospective from 6.3.
 
-This is the last file in the curriculum. When it's complete, the course is
-complete.
+This is the last file in the curriculum. When it's complete, the course is complete.
 
-At that point, the notes should be useful without the code open. A future reader should be
-able to understand what was trained, how it was evaluated, which results were convincing, and
-which parts still need work.
+The notes should then be useful without the code open. A future reader should be able to
+understand what was trained, how it was evaluated, which results were convincing, and which
+parts still need work.

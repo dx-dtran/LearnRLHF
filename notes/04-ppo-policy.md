@@ -149,11 +149,11 @@ Or in code-style:
 
 where `N` is the count of masked-in response tokens.
 
-Read the `min` carefully: we take the **smaller** (more pessimistic) of the two
-surrogates, then *negate* the whole thing for the loss. Equivalently: inside the
-objective (before the negation), we take the *minimum* of `surr1` and `surr2`,
-i.e. the less favorable one. This setup prevents the policy from being rewarded for running
-the ratio far outside `[1 - eps, 1 + eps]` in the direction of increasing the objective.
+The `min` takes the smaller (more pessimistic) of the two surrogates, and the negation in
+front turns it into a loss. Inside the objective (before negation) we take the minimum of
+`surr1` and `surr2`, i.e. the less favorable one. This setup prevents the policy from being
+rewarded for running the ratio far outside `[1 - eps, 1 + eps]` in the direction of
+increasing the objective.
 
 The negation is a common source of confusion. PPO papers usually describe maximizing the
 surrogate objective. PyTorch optimizers usually minimize a loss. This repo writes the loss as
@@ -182,6 +182,27 @@ flowing. For positive advantages, an extreme improvement means the sampled token
 more likely. For negative advantages, an extreme improvement means the sampled token became
 much less likely. The table below writes out those cases.
 
+Two more numerical cases finish the picture. Same `epsilon = 0.2`, clip range `[0.8, 1.2]`:
+
+- **Token C (good action moving the wrong way).** Advantage `A = +1`, ratio
+  `rho = 0.5`. The policy made a good action *less* likely than at rollout. Compute:
+  `surr1 = 0.5`, `surr2 = clip(0.5, 0.8, 1.2) * 1 = 0.8`. `min = 0.5`. Loss
+  `= -0.5`. The clip does not fire, because firing it would replace the smaller
+  unclipped value (`0.5`) with the larger clipped value (`0.8`) — the wrong direction
+  for a "pessimistic" choice. Gradient through `rho` is `-A * rho = -0.5` (nonzero),
+  which after one optimizer step makes the action more likely again. Good.
+- **Token D (bad action moving the wrong way).** Advantage `A = -1`, ratio
+  `rho = 2.0`. The policy made a bad action *more* likely than at rollout. Compute:
+  `surr1 = -2.0`, `surr2 = clip(2.0, 0.8, 1.2) * (-1) = -1.2`. `min = -2.0`. Loss
+  `= +2.0`. The clip does not fire here either: replacing `-2.0` with `-1.2` would
+  *raise* the inner objective, the opposite of pessimistic. Gradient through `rho`
+  is `-A * rho = +2.0` (nonzero, large), pushing this bad action's probability back
+  down. The clip never spares the policy from correcting a bad move.
+
+Same pattern, four cases. Whenever the ratio is on the "fighting the advantage"
+side of 1 (good action being made less likely, or bad action being made more
+likely), the clip stays out of the way and the gradient corrects course.
+
 ### 2.2 What "pessimistic" means, case by case
 
 There are essentially four cases based on the sign of `A` and where `rho` sits.
@@ -197,11 +218,10 @@ Here's a compact table. "Gradient" means gradient of `L_clip_t` with respect to
 | A < 0 | rho < 1 - eps | `surr2` | `surr2` | **0** (clipped) |
 | A < 0 | rho > 1 + eps | `surr1` | `surr1` | `-A * rho` |
 
-The pattern: **the clip only fires when firing it would pull the objective back**.
-That is, when the policy is already moving in a good direction and has gone "too
-far". When the policy is moving in the wrong direction (ratio on the wrong side
-of 1), the clip *doesn't* fire, so we still get gradient signal pushing the ratio
-back toward 1.
+The clip only fires when firing it would pull the objective back. That happens when the
+policy is already moving in a good direction and has gone too far. When the policy is moving
+in the wrong direction (ratio on the wrong side of 1), the clip does not fire, so the
+gradient still pushes the ratio back toward 1.
 
 ### 2.3 Deriving the piecewise gradient
 
@@ -380,6 +400,52 @@ Gradient-check the whole thing at fp64 in Problem 4.6. Include a case where
 `V_theta` is far from both `V_old` and `R` — make sure the gradient matches what
 you'd compute by hand for the selected branch.
 
+### 3.5 Worked example: clipped value loss
+
+Set `eps_v = 0.2`. One token at one position:
+
+    V_old = 0.5
+    V_theta = 1.5
+    R = 0.7
+
+Compute both branches:
+
+    V_clipped = V_old + clip(V_theta - V_old, -eps_v, +eps_v)
+              = 0.5 + clip(1.0, -0.2, +0.2)
+              = 0.5 + 0.2 = 0.7
+
+    branch_unclipped = (V_theta - R)^2     = (1.5 - 0.7)^2 = 0.64
+    branch_clipped   = (V_clipped - R)^2   = (0.7 - 0.7)^2 = 0.00
+
+    per_tok_loss = 0.5 * max(0.64, 0.00) = 0.32
+
+`max` picks the unclipped branch. Gradient through `V_theta`:
+
+    d(per_tok_loss) / dV_theta = (V_theta - R) = +0.8
+
+After one optimizer step at lr 1.0, `V_theta` moves to `0.7`, exactly matching
+`R`. If we had ignored the clip and just used MSE, `V_theta` would still have
+moved to `0.7` after one step on this single example — same direction, same
+magnitude, because the unclipped branch was selected. The clip only matters when
+its branch wins the `max`.
+
+Now flip: same `V_old = 0.5`, `R = 0.7`, but `V_theta = 0.55`. Then
+`V_clipped = 0.55` (clip inactive), both branches are `(0.55 - 0.7)^2 = 0.0225`,
+the `max` is the same number, and gradient is `(V_theta - R) = -0.15`. Plain
+MSE behavior, as expected near the on-policy limit.
+
+### 3.6 Why the clip helps early in training
+
+Suppose the value head is fresh and outputs `V_old = 0.0` at every position.
+The first batch returns `R` values around `5.0` (the reward model produced
+larger numbers than the value head expected). Without clipping, the value
+gradient pushes every position's `V_theta` toward `5.0` in one step, which
+overshoots and feeds garbage advantages into the next iteration. With
+`eps_v = 0.2`, no single step can move `V_theta` more than `0.2` away from
+`V_old`, so the value head learns gradually and the policy never sees a
+single iteration of severely miscalibrated advantages. The cost is slower
+value learning; the benefit is that the policy stops diverging.
+
 ---
 
 ## 4. Entropy bonus (Problem 4.7)
@@ -507,6 +573,46 @@ pushes that dominant logit down, spreading probability mass out.
 Gradient-check the entropy at fp64 on a small logits tensor. Apply the mask,
 verify that flipping logits *outside* the mask doesn't change the computed
 entropy or its gradient.
+
+### 4.6 Worked example: entropy on a 3-class softmax
+
+Logits `z = (1, 0, -1)`. Softmax:
+
+    exp(1) ≈ 2.718,  exp(0) = 1.000,  exp(-1) ≈ 0.368
+    Z = 4.086
+    p = (0.665, 0.245, 0.090)
+
+Entropy:
+
+    H = -sum p * log p
+      = -(0.665 * (-0.408) + 0.245 * (-1.407) + 0.090 * (-2.408))
+      ≈ 0.272 + 0.345 + 0.217
+      ≈ 0.834 nats
+
+Gradient `dH/dz = -p * (log p + H)`:
+
+    log p ≈ (-0.408, -1.407, -2.408)
+    log p + H ≈ ( 0.426, -0.573, -1.574)
+    dH/dz ≈ -p * (log p + H)
+          ≈ -(0.665, 0.245, 0.090) * (0.426, -0.573, -1.574)
+          ≈ (-0.283, +0.140, +0.142)
+
+Read the signs. The dominant logit (index 0) has `dH/dz < 0`, so increasing it
+*decreases* entropy. The two smaller logits have `dH/dz > 0`, so raising them
+*increases* entropy by spreading mass. The PPO loss contains `-c_entropy * H`,
+so gradient descent on the loss *adds* `c_entropy * dH/dz` to each logit's
+update. With `c_entropy > 0` that pushes the dominant logit down and the small
+logits up, smoothing the distribution. With `c_entropy = 0` (our default) the
+term contributes nothing.
+
+Two sanity-check limits:
+
+- Uniform `p = (1/3, 1/3, 1/3)`: `log p = -log 3` everywhere, `H = log 3`, so
+  `log p + H = 0` for every class and `dH/dz = 0`. Uniform is the entropy maximum.
+- Near-deterministic `p ≈ (0.999, 0.0005, 0.0005)`: `H ≈ 0.008`, the small classes
+  have `log p ≈ -7.6`, `log p + H ≈ -7.59`, and `dH/dz` for those classes is large
+  positive (about `+0.0038`). Tiny in absolute scale because `p` is tiny, but
+  enough to nudge the distribution back toward something less peaky.
 
 ---
 

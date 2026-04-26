@@ -14,8 +14,9 @@ trustworthy guide.
 
 Think of the SFT model as the student's current style before RLHF starts. The reward model is
 the teacher's score. KL is the cost of changing style too aggressively while chasing that
-score. A little change is the point of training. A huge change is dangerous because the model
-may discover strange text that fools the grader but is worse for humans.
+score. Some change is the point of training; the KL term puts a price on each unit of change
+so the model does not race off and discover strange text that fools the grader without
+helping humans.
 
 By the end you should be able to:
 
@@ -29,12 +30,9 @@ By the end you should be able to:
 
 ## 0. A five-minute KL divergence primer
 
-Before we use KL divergence, we should know what it is. If you already do, skim
-this and keep going.
-
-KL divergence is a number that measures **how different two probability
-distributions are**, from the point of view of one of them. For two distributions
-$P$ and $Q$ over the same set of outcomes, the KL divergence from $P$ to $Q$ is:
+KL divergence is a number that measures how different two probability distributions are,
+from the point of view of one of them. For two distributions $P$ and $Q$ over the same
+set of outcomes, the KL divergence from $P$ to $Q$ is:
 
 $$
 \mathrm{KL}(P \| Q) = \sum_x P(x) \cdot \log \frac{P(x)}{Q(x)}
@@ -193,8 +191,8 @@ But we don't have the full distribution or an exact expectation. We have exactly
 one sample $a_t$ drawn from $\pi_\theta$. What's our best single-sample estimate?
 
 This sample-based setting is why the estimators below can look strange. A true KL divergence
-is nonnegative, but a one-sample estimate of it does not have to be. The estimator only needs
-to average to the right value over many samples. In training logs, however, negative
+is nonnegative, while a one-sample estimate of it does not have to be. The estimator only
+needs to average to the right value over many samples. In training logs, negative
 single-sample KL values are visually confusing, which motivates the separate diagnostic
 estimator.
 
@@ -317,8 +315,117 @@ In this repo: `kl_k1` goes into `shape_reward`; `kl_k3` is computed for the CSV
 log but not used in gradients.
 
 That separation is intentional. The training reward should match the algorithm you are
-studying. The logging metric should be easy to read. Those are related goals, but they are
-not identical goals.
+studying. The logging metric should be easy to read. Those goals overlap but are not the
+same.
+
+### 3.5 Worked example: comparing k_1, k_2, k_3 on the same samples
+
+Pick two fixed three-class distributions:
+
+    pi      = (0.5, 0.3, 0.2)         # current policy
+    pi_ref  = (0.4, 0.4, 0.2)         # reference (frozen)
+
+Analytic forward KL (computed as a check; PPO never actually has it):
+
+    KL(pi || pi_ref) = 0.5*log(0.5/0.4) + 0.3*log(0.3/0.4) + 0.2*log(0.2/0.2)
+                     ≈ 0.0247 nats
+
+Now imagine 5 single-token samples drawn from `pi`. For each sample we record
+the action `a`, then compute `L = log pi(a) - log pi_ref(a)` and the three
+estimators. Suppose the samples are `a = 0, 0, 1, 0, 2` (which is plausible
+under `pi`, since class 0 is most likely).
+
+```
+sample  a    pi(a)  pi_ref(a)   L = log(pi/pi_ref)   k_1     k_2 = 0.5*L^2   inv_rho = pi_ref/pi   k_3 = inv_rho - 1 + L
+1       0    0.5    0.4         +0.2231              +0.2231  +0.0249         0.800                 -0.200 + 0.2231 ≈ +0.0231
+2       0    0.5    0.4         +0.2231              +0.2231  +0.0249         0.800                 +0.0231
+3       1    0.3    0.4         -0.2877              -0.2877  +0.0414         1.333                 +0.333 - 0.2877 ≈ +0.0457
+4       0    0.5    0.4         +0.2231              +0.2231  +0.0249         0.800                 +0.0231
+5       2    0.2    0.2          0.0                  0.0      0.0            1.000                  0.0
+```
+
+Sample averages:
+
+    mean k_1 ≈ +0.0769          # signed; matches forward KL only in expectation
+    mean k_2 ≈ +0.0232          # always non-negative; biased estimator of KL
+    mean k_3 ≈ +0.0190          # always non-negative; unbiased for forward KL
+
+`k_1` overshoots the true 0.0247 here on this small sample because it weighted
+the three positive samples more than the one negative. Over many samples, both
+`k_1` and `k_3` will average to ~0.0247. `k_2` measures something different
+(the squared log-ratio); it happens to be close in this example, but in
+general it does not match KL.
+
+Notice sample 3: `k_1 = -0.2877` (negative, weird-looking for a divergence),
+while `k_3 = +0.0457` (always non-negative). This is the variance reduction in
+action: `k_3` adds the `(inv_rho - 1)` correction, which has expected value 0
+under `pi` but pulls extreme single-sample values back toward 0.
+
+### 3.6 Worked example: per-token KL and reward shaping
+
+Take a 5-token response with `beta = 0.02` and terminal reward
+`r_RM = +1.5`. Suppose during rollout we recorded the per-token current-policy
+log-probs and the reference's log-probs:
+
+```
+pos:               0      1      2      3      4
+piece:             "The"  "ans"  "wer"  "is"   "<|im_end|>"
+logprobs (theta): -1.20  -1.50  -2.00  -1.10  -0.30
+logprobs (ref):   -1.50  -1.40  -2.20  -1.30  -0.50
+response_mask:    1      1      1      1      1
+last_idx:                                       <-- terminal reward injected here
+```
+
+Per-token KL via `k_1`:
+
+    KL_k1[t] = logprobs[t] - ref_logprobs[t]
+             = +0.30, -0.10, +0.20, +0.20, +0.20
+
+Per-token reward via the shaping formula:
+
+    r[t] = -beta * KL_k1[t] * response_mask[t] + r_RM * (t == last_idx)
+
+```
+pos:        0       1       2       3       4
+-beta*KL: -0.0060 +0.0020 -0.0040 -0.0040 -0.0040
++r_RM*1{t==4}: 0     0       0       0     +1.5000
+r[t]:    -0.0060 +0.0020 -0.0040 -0.0040 +1.4960
+```
+
+Read the row out loud. Most positions get a tiny negative reward (the policy
+moved slightly away from the reference and is paying KL). Position 1 has a
+small positive reward (the policy moved *toward* the reference there — a
+single-sample artifact, since `k_1` is signed). The terminal token carries the
+RM's verdict on the whole response, lightly attenuated by its own KL term.
+
+GAE will then propagate that final +1.5 backward through the response,
+discounted by `(gamma * lambda)`, while keeping the per-position KL costs
+local. That is what makes the policy learn "stay close to ref except where
+moving away clearly improved the eventual reward."
+
+### 3.7 Worked example: edge cases for shaping
+
+Two limits that are worth checking explicitly.
+
+**`beta = 0`.** Plug into the shaping formula:
+
+    r[t] = -0 * KL_k1[t] + r_RM * (t == last_idx)
+         = r_RM * (t == last_idx)
+
+So every position is 0 except the last, which is the terminal RM reward. No
+token-level pressure to stay near `pi_ref`. PPO will discover the highest-RM
+output regardless of how strange. This is the unit test for `beta = 0`:
+shape_reward should reduce to a single nonzero entry per row.
+
+**`pi = pi_ref` exactly.** Then `logprobs == ref_logprobs` at every position,
+so `KL_k1[t] = 0` for all `t`. Shaped reward is again purely terminal:
+
+    r[t] = r_RM * (t == last_idx)
+
+This case happens by construction in the very first PPO iteration after
+loading both policy and reference from `sft.pt`. The KL contribution is
+exactly zero on the first batch, and the only signal driving the policy is
+the terminal RM reward. Useful sanity check during debugging.
 
 ---
 

@@ -20,9 +20,9 @@ loss will confidently push tokens in the wrong direction. That is why GAE gets i
 and its own tests.
 
 For every generated token, PPO needs to decide whether that exact token should become more
-likely next time. The advantage supplies the answer. Positive advantage means the token led
-to a better outcome than expected. Negative advantage means the token led to a worse outcome
-than expected. GAE turns delayed rewards, value predictions, and masks into those per-token
+likely next time. The advantage answers that. Positive advantage means the token led to a
+better outcome than expected. Negative advantage means the token led to a worse outcome than
+expected. GAE turns delayed rewards, value predictions, and masks into those per-token
 signals.
 
 ---
@@ -62,8 +62,7 @@ baseline.
 
 ### 1.1 A concrete rollout
 
-If this is your first time meeting RL, the abstractions above can feel slippery.
-Make it concrete. Suppose the prompt is:
+Suppose the prompt is:
 
     s_0 = "<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n"
 
@@ -183,7 +182,7 @@ just the return-to-go $\hat G_t$ without changing the expectation. Done.
 
 Intuition for the end result: at each step, we nudge the model to make the action
 it took more (or less) likely, weighted by how good the future turned out to be.
-"Take what worked, do more of it" — gradient descent on trial and error.
+Trial and error, propagated through the chain rule.
 
 The theorem is powerful because it avoids differentiating through the sampling operation.
 Sampling a token is discrete, so ordinary backpropagation cannot pass through "which token
@@ -250,8 +249,8 @@ the variance of the estimator. The best choice is $b(s_t) = \mathbb{E}[\hat G_t 
 behind only the *action-specific* deviation from the average.
 
 We learn such a $b$ with a neural network and call it the **value function**
-$V(s_t)$. The difference between the observed return and the expected return is
-called the **advantage**:
+$V(s_t)$. The observed return minus this expected return is called the
+**advantage**:
 
 $$
 A_t  =  \hat G_t  -  V(s_t)
@@ -492,6 +491,108 @@ Result: `advantages = [1, 0, 0]`, `returns = [1, 0, 0]`.
 Add a second test with a pad token in the middle — your implementation should
 handle the `nonterm` mask correctly, zeroing out the bootstrap at the pad
 position.
+
+### 5.6 Worked example: GAE with a non-zero value baseline
+
+The all-zero example above hides what GAE actually does, because the value
+function is silent. Try a slightly more realistic case. Set `T = 3`,
+`gamma = 1`, `lambda = 0.95`, `nonterm = [1, 1, 1, 0]` (the position after
+the last real step is terminal). Per-token rewards and value estimates:
+
+    rewards = [0.0, 0.0, 1.0]
+    values  = [0.5, 0.3, 0.0]                 # V(s_T) = 0 by convention
+
+Step backward through `delta_t = r_t + gamma * V_{t+1} - V_t` and
+`A_t = delta_t + gamma * lambda * A_{t+1}`.
+
+    t = 2:
+        delta_2 = 1.0 + 1*0 - 0.0   = +1.0
+        A_2     = 1.0 + 0.95 * 0     = +1.0
+
+    t = 1:
+        delta_1 = 0.0 + 1*0.0 - 0.3 = -0.3
+        A_1     = -0.3 + 0.95 * 1.0  = +0.65
+
+    t = 0:
+        delta_0 = 0.0 + 1*0.3 - 0.5 = -0.2
+        A_0     = -0.2 + 0.95 * 0.65 = +0.4175
+
+So `advantages = [0.4175, 0.65, 1.0]` and `returns = A + V = [0.9175, 0.95, 1.0]`.
+
+Read out the structure: the value head expected to receive about `0.5` total
+return at `t=0` and `0.3` at `t=1`, but the actual outcome was a single unit of
+reward at `t=2`. GAE attributes most of the surprise to the last step (where
+the reward arrives) and bleeds a smaller share back to earlier steps,
+discounted by `(gamma * lambda)`.
+
+### 5.7 Worked example: lambda = 0 collapse to one-step TD
+
+Same rewards `[0, 0, 1]`, same `values = [0.5, 0.3, 0.0]`, same `gamma = 1`.
+Now `lambda = 0`. The recursion `A_t = delta_t + gamma * lambda * A_{t+1}`
+loses the future term entirely:
+
+    t = 2: A_2 = delta_2 = +1.0
+    t = 1: A_1 = delta_1 = -0.3
+    t = 0: A_0 = delta_0 = -0.2
+
+So `advantages = [-0.2, -0.3, 1.0]`. This is exactly the per-step TD error.
+Notice that earlier steps now get *negative* advantages, because the value
+head's optimistic predictions were wrong about *that* step in isolation, even
+though the trajectory eventually paid off. Low variance (each advantage is one
+TD error), high bias (we trust `V` to summarize the future).
+
+### 5.8 Worked example: lambda = 1 collapse to Monte Carlo
+
+Same setup, `lambda = 1`. The recursion becomes a plain backward sum of TD
+errors:
+
+    t = 2: A_2 = +1.0
+    t = 1: A_1 = -0.3 + 1.0 = +0.7
+    t = 0: A_0 = -0.2 + 0.7 = +0.5
+
+So `advantages = [0.5, 0.7, 1.0]`. Algebraically, `A_t = (sum_{k=t..T-1} r_k) -
+V(s_t)` here — Monte Carlo return minus the baseline. Higher variance because
+each advantage carries the full reward tail, but no systematic bias from `V`'s
+bootstraps.
+
+Compare the three rows:
+
+```
+lambda     A_0     A_1     A_2
+0.00     -0.20   -0.30   +1.00       # one-step TD
+0.95     +0.42   +0.65   +1.00       # standard PPO setting
+1.00     +0.50   +0.70   +1.00       # Monte Carlo
+```
+
+`lambda` is sliding between the all-bias and all-variance corners. PPO's
+preferred `0.95` lives close to the Monte Carlo end but inherits enough of `V`
+to dampen variance.
+
+### 5.9 Worked example: padded batch
+
+Two rollouts of different lengths, both padded to length 5. The mask
+`nonterm[t]` is `1` while inside the real episode and `0` afterwards.
+
+    row 0: actual length 3, nonterm = [1, 1, 1, 0, 0]
+    row 1: actual length 5, nonterm = [1, 1, 1, 1, 1]
+
+Per-row rewards and values:
+
+    row 0: rewards = [0, 0, 1, 0, 0]   values = [0.4, 0.2, 0.0, 0.0, 0.0]
+    row 1: rewards = [0, 0, 0, 0, 1]   values = [0.6, 0.4, 0.3, 0.1, 0.0]
+
+For row 0, the recursion only "pays attention" to positions 0..2. At `t=3`,
+`nonterm = 0`, so `delta_3 = r_3 + gamma * V_4 * 0 - V_3 = 0`, and `A_3 = 0 +
+gamma*lambda * A_4 * 0 = 0`. Same at `t=4`. Without the `nonterm` factor on
+the recursion's bootstrap term, advantages from positions 3 and 4 (which are
+just padding) would leak into position 2's computation. The mask zeroes them
+explicitly, so row 0's GAE advantages match what you'd compute on a
+length-3 sequence in isolation.
+
+This is the bug Problem 4.4's pad-in-the-middle test catches. If you forget
+the `nonterm` factor on the bootstrap, both rows still produce numbers, but
+row 0's advantages will be wrong in a way that depends on the (arbitrary)
+padding values.
 
 ---
 
