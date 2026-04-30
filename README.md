@@ -111,12 +111,12 @@ note before implementing the loss, and re-derive each gradient on paper as you g
 **1. Causal LM / SFT.**
 
 $$
-\mathcal{L} = -\frac{1}{N_\text{resp}} \sum_t m_t \, \log \mathrm{softmax}(W h_t)_{y_t}
+\mathcal{L} = -\frac{1}{N_{\text{resp}}} \sum_t m_t \log \mathrm{softmax}(W h_t)_{y_t}
 $$
 
 $$
 \frac{\partial \mathcal{L}}{\partial \mathrm{logits}_t}
-= \frac{m_t}{N_\text{resp}} \left( \mathrm{softmax}(\mathrm{logits}_t) - \mathbf{1}_{y_t} \right)
+= \frac{m_t}{N_{\text{resp}}} \left( \mathrm{softmax}(\mathrm{logits}_t) - \mathbf{1}_{y_t} \right)
 $$
 
 **2. Reward model (Bradley–Terry).**
@@ -136,12 +136,12 @@ Note the symmetry: the gradients sum to zero.
 **3. PPO clipped surrogate.**
 
 $$
-\rho_t = \exp(\log \pi_t - \log \pi_t^\text{old})
+\rho_t = \exp(\log \pi_t - \log \pi_t^{\text{old}})
 $$
 
 $$
-\mathcal{L}_t^\text{clip}
-= -\min\!\left( \rho_t A_t, \; \mathrm{clip}(\rho_t, 1-\varepsilon, 1+\varepsilon) \cdot A_t \right)
+\mathcal{L}_t^{\text{clip}}
+= -\min\left( \rho_t A_t, \mathrm{clip}(\rho_t, 1-\varepsilon, 1+\varepsilon) \cdot A_t \right)
 $$
 
 When the clip is active and the clipped branch is the one that would raise the
@@ -152,12 +152,12 @@ with $\mathrm{sign}(A_t)$.
 **4. KL penalty (per-token).**
 
 $$
-\mathrm{KL}_t \approx \log \pi_t - \log \pi_t^\text{ref}
+\mathrm{KL}_t \approx \log \pi_t - \log \pi_t^{\text{ref}}
 \qquad (k_1 \text{ estimator, unbiased, high variance})
 $$
 
-Token reward: $r_t = r_\text{RM} \cdot \mathbf{1}_{t=T} - \beta \cdot \mathrm{KL}_t$.
-Since $\pi^\text{ref}$ is frozen: $\partial \mathrm{KL}_t / \partial \log \pi_t = 1$.
+Token reward: $r_t = r_{\text{RM}} \cdot \mathbf{1}_{t=T} - \beta \cdot \mathrm{KL}_t$.
+Since $\pi^{\text{ref}}$ is frozen: $\partial \mathrm{KL}_t / \partial \log \pi_t = 1$.
 
 The $k_3$ estimator $(\rho - 1) - \log \rho$ is nonnegative and lower-variance, preferred
 for logging but nonlinear in $\rho$ as a penalty.
@@ -174,12 +174,12 @@ $R_t$ is a stop-gradient constant even though it was computed from $V$ via GAE.
 **6. Entropy bonus.**
 
 $$
-H = -\sum_a \pi(a) \, \log \pi(a)
+H = -\sum_a \pi(a) \log \pi(a)
 $$
 
 $$
 \frac{\partial H}{\partial \mathrm{logits}}
-= -\, \pi \odot (\log \pi + H)
+= -\pi \odot (\log \pi + H)
 $$
 
 Start with coefficient 0; increase if you see premature determinism.
@@ -308,8 +308,10 @@ Each function lives in `ppo_core.py` with its own gradient test.
 
 **4.1 Rollout: `generate_with_logprobs(policy, prompts, max_new_tokens)`.**
 Returns `response_tokens`, `logprobs_old`, `values_old`, `attention_mask`, `response_mask`.
-Single forward per step. Critical: log-prob at position $t$ must be
-$\log p(\mathrm{token}_{t+1} \mid \mathrm{prefix}_{\le t})$.
+Single forward per step. Critical: the log-prob at position $t$ must be
+
+$$\log p(\mathrm{token}_{t+1} \mid \mathrm{prefix}_{\le t})$$
+
 Artifact: shape/alignment test passes.
 
 **4.2 Per-token KL.**
@@ -319,8 +321,10 @@ Explain the variance tradeoff in `notes/04-ppo-kl.md`.
 Artifact: unit test that k1 integrates to expected KL on a known distribution.
 
 **4.3 Reward shaping.**
-Terminal reward $r_\text{RM}$ from RM at `<|im_end|>`; per-token reward
-$r_t = -\beta \cdot \mathrm{KL}_t + r_\text{RM} \cdot \mathbf{1}_{t=T}$.
+Terminal reward $r_{\text{RM}}$ from RM at `<|im_end|>`. Per-token reward:
+
+$$r_t = -\beta \cdot \mathrm{KL}_t + r_{\text{RM}} \cdot \mathbf{1}_{t=T}$$
+
 Test: $\beta \to 0$ collapses to pure RM terminal reward.
 Artifact: unit test passes.
 
@@ -335,7 +339,7 @@ Artifact: test passes with hand-computed example.
 **4.5 PPO clipped policy loss.**
 
 $$
-\mathcal{L}_\pi = -\mathbb{E}\!\left[ \min\!\left( \rho A, \; \mathrm{clip}(\rho, 1-\varepsilon, 1+\varepsilon) \cdot A \right) \cdot \mathrm{mask} \right]
+\mathcal{L}_\pi = -\mathbb{E}\left[ \min\left( \rho A, \mathrm{clip}(\rho, 1-\varepsilon, 1+\varepsilon) \cdot A \right) \cdot \mathrm{mask} \right]
 $$
 
 Derive piecewise gradient in `notes/04-ppo-policy.md`. Gradient-check at fp64.
@@ -345,7 +349,7 @@ Artifact: test_grad_ppo.py::test_ppo_policy_loss_grad passes.
 **4.6 Value loss (clipped).**
 
 $$
-\mathcal{L}_V = \tfrac{1}{2} \, \max\!\left( (V - R)^2, \; (\mathrm{clip}(V, V_\text{old} - \varepsilon_v, V_\text{old} + \varepsilon_v) - R)^2 \right) \cdot \mathrm{mask}
+\mathcal{L}_V = \tfrac{1}{2} \max\left( (V - R)^2, (\mathrm{clip}(V, V_{\text{old}} - \varepsilon_v, V_{\text{old}} + \varepsilon_v) - R)^2 \right) \cdot \mathrm{mask}
 $$
 
 Gradient-check. Explain why clipping value helps early training in `notes/04-ppo-policy.md`.
@@ -378,9 +382,11 @@ Artifact: one rollout iteration runs without error.
 
 **5.3 Inner loop (optimize phase).**
 For $K = 4$ epochs, iterate minibatches, compute
-$\mathcal{L} = \mathcal{L}_\pi + c_v \mathcal{L}_V - c_\text{ent} H$, backward, clip
-grad norm to 1.0, step. Recompute $\log \pi$ and $V$ freshly each minibatch;
-$\log \pi^\text{old}$ is frozen from rollout.
+
+$$\mathcal{L} = \mathcal{L}_\pi + c_v \mathcal{L}_V - c_{\text{ent}} H$$
+
+backward, clip grad norm to 1.0, step. Recompute $\log \pi$ and $V$ freshly each
+minibatch; $\log \pi^{\text{old}}$ is frozen from rollout.
 Artifact: one full inner loop runs without error.
 
 **5.4 Logging.**
@@ -525,13 +531,3 @@ Rules:
 - [ ] `notes/` has one markdown per module with your own derivations.
 - [ ] `gpt2-small` trains end-to-end on a 24GB GPU via `config.py`.
 - [ ] No dependency on `transformers`, `trl`, `accelerate`, `peft`, or `deepspeed`.
-
----
-
-## 13. Norms
-
-- No `transformers.Trainer`, no `trl`, no `accelerate`, no `peft`, no `deepspeed`.
-  `transformers` is only allowed in `load_gpt2_from_hf` for the one-time weight load.
-- No `ignore_index=-100`. Always an explicit `loss_mask` multiplied in.
-- `nn.Module` yes; dataclasses yes; anything more abstract — no.
-- Comments explain *why*, not *what*.
