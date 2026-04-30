@@ -308,8 +308,10 @@ Each function lives in `ppo_core.py` with its own gradient test.
 
 **4.1 Rollout: `generate_with_logprobs(policy, prompts, max_new_tokens)`.**
 Returns `response_tokens`, `logprobs_old`, `values_old`, `attention_mask`, `response_mask`.
-Single forward per step. Critical: log-prob at position $t$ must be
-$\log p(\mathrm{token}_{t+1} \mid \mathrm{prefix}_{\le t})$.
+Single forward per step. Critical: the log-prob at position $t$ must be
+
+$$\log p(\mathrm{token}_{t+1} \mid \mathrm{prefix}_{\le t})$$
+
 Artifact: shape/alignment test passes.
 
 **4.2 Per-token KL.**
@@ -319,8 +321,10 @@ Explain the variance tradeoff in `notes/04-ppo-kl.md`.
 Artifact: unit test that k1 integrates to expected KL on a known distribution.
 
 **4.3 Reward shaping.**
-Terminal reward $r_{\text{RM}}$ from RM at `<|im_end|>`; per-token reward
-$r_t = -\beta \cdot \mathrm{KL}_t + r_{\text{RM}} \cdot \mathbf{1}_{t=T}$.
+Terminal reward $r_{\text{RM}}$ from RM at `<|im_end|>`. Per-token reward:
+
+$$r_t = -\beta \cdot \mathrm{KL}_t + r_{\text{RM}} \cdot \mathbf{1}_{t=T}$$
+
 Test: $\beta \to 0$ collapses to pure RM terminal reward.
 Artifact: unit test passes.
 
@@ -378,9 +382,11 @@ Artifact: one rollout iteration runs without error.
 
 **5.3 Inner loop (optimize phase).**
 For $K = 4$ epochs, iterate minibatches, compute
-$\mathcal{L} = \mathcal{L}_\pi + c_v \mathcal{L}_V - c_{\text{ent}} H$, backward, clip
-grad norm to 1.0, step. Recompute $\log \pi$ and $V$ freshly each minibatch;
-$\log \pi^{\text{old}}$ is frozen from rollout.
+
+$$\mathcal{L} = \mathcal{L}_\pi + c_v \mathcal{L}_V - c_{\text{ent}} H$$
+
+backward, clip grad norm to 1.0, step. Recompute $\log \pi$ and $V$ freshly each
+minibatch; $\log \pi^{\text{old}}$ is frozen from rollout.
 Artifact: one full inner loop runs without error.
 
 **5.4 Logging.**
