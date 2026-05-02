@@ -14,12 +14,10 @@ Math (put in notes/03-rm.md before you implement):
     Maximum-likelihood under this model gives per-pair loss:
         L  =  -log σ(r_c - r_r)  =  softplus(r_r - r_c).
     Derivatives:
-        ∂L/∂r_c  =  -σ(r_r - r_c)  =  σ(r_c - r_r) - 1
-        ∂L/∂r_r  =   σ(r_r - r_c)
-    Note the symmetry: ∂L/∂r_c + ∂L/∂r_r = -1 + 1 = 0 ... wait, actually
-        ∂L/∂r_c = -(1 - σ(r_c - r_r))         (negative: pushes r_c UP)
-        ∂L/∂r_r =  (1 - σ(r_c - r_r))         (positive: pushes r_r DOWN)
-    They are exact negatives, which matches intuition.
+        ∂L/∂r_c  =  σ(r_c - r_r) - 1   = -(1 - σ(r_c - r_r))   (negative: pushes r_c UP)
+        ∂L/∂r_r  =  1 - σ(r_c - r_r)                            (positive: pushes r_r DOWN)
+    The two gradients are exact negatives, so they sum to zero. Bradley–Terry is
+    invariant under a constant shift of both scores.
 
 Use `softplus` rather than `-log(sigmoid(.))` to avoid under/overflow for large |Δr|.
 """

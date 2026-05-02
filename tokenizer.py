@@ -5,10 +5,9 @@ Modules this file covers:
     0.2  inspect HH token lengths
     2.1  chat formatter + loss mask
 
-We use the stock GPT-2 BPE from `tiktoken`. The chat tags `<|im_start|>` and `<|im_end|>`
-are NOT special tokens in GPT-2 BPE — we deliberately encode them as their literal UTF-8
-bytes so that no vocab surgery is needed. This matches the data format in the original
-jsonl and keeps things transparent.
+Stock GPT-2 BPE from `tiktoken`. The chat tags `<|im_start|>` and `<|im_end|>` are
+not special tokens in GPT-2 BPE; they are encoded as their literal UTF-8 bytes so no
+vocab surgery is needed. This matches the data format in the original jsonl.
 
 Public API (what the rest of the repo imports):
     enc                       -> a module-level tiktoken.Encoding
@@ -88,11 +87,11 @@ def build_sft_example(turns: List[dict]) -> Tuple[List[int], List[int]]:
     (`<|im_start|>user\\n`, role tags, etc.) must be masked to 0.
 
     Why this matters:
-        The old code in this repo trained on *every* token — meaning GPT-2 was rewarded
-        for predicting user messages too. That's wrong: we want a model that predicts the
-        assistant's text given the user's, not one that predicts the user's messages.
+        Earlier code in this repo trained on every token, so GPT-2 was rewarded for
+        predicting user messages too. The desired behavior is to predict the
+        assistant's text given the user's, not to predict user messages.
 
-    Strategy (one easy approach; feel free to invent your own):
+    Strategy (one approach; alternative implementations are fine):
         1. Start with the empty output lists.
         2. For each turn:
              a. Tokenize the SCAFFOLD: f"{IM_START}{role}\\n"     -> mask = 0
@@ -104,11 +103,10 @@ def build_sft_example(turns: List[dict]) -> Tuple[List[int], List[int]]:
     TODO(2.1): implement.
 
     Hints:
-        - Encode small chunks separately and concatenate. Do NOT try to find roles by
-          searching for `<|im_start|>` in an already-encoded id stream — BPE makes that
-          unreliable.
-        - Your unit test (tests/test_data.py) will check: (a) lengths match; (b) the
-          positions of 1s in loss_mask correspond only to assistant content + its
+        - Encode small chunks separately and concatenate. Do NOT search for
+          `<|im_start|>` in an already-encoded id stream; BPE makes that unreliable.
+        - The unit test (tests/test_data.py) checks: (a) lengths match; (b) the
+          positions of 1s in loss_mask correspond only to assistant content plus its
           trailing <|im_end|>\\n.
     """
     raise NotImplementedError("TODO(2.1): implement build_sft_example")
