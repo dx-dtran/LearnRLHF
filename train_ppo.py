@@ -22,10 +22,11 @@ Each PPO iteration:
        backward, clip, step.
     3. LOG: reward, KL (k3), policy loss, value loss, entropy, clip frac, tokens/sec.
 
-Memory: all 4 models live in bf16 (ref + RM frozen so they don't keep activations at
-full precision; you can call them under torch.no_grad() and autocast). Policy + value
-accumulate activations; use gradient checkpointing on the policy's blocks if OOM —
-wrap each block's forward in torch.utils.checkpoint.checkpoint.
+Memory: all 4 models live in bf16. Ref and RM are frozen, so they do not keep
+activations at full precision; call them under `torch.no_grad()` and autocast.
+Policy and value accumulate activations. If memory is tight, use gradient
+checkpointing on the policy's blocks by wrapping each block's forward in
+`torch.utils.checkpoint.checkpoint`.
 """
 
 # =====================================================================================
@@ -94,9 +95,8 @@ wrap each block's forward in torch.utils.checkpoint.checkpoint.
 #             stats[...].append(...)
 #     return {k: mean(v) for k,v in stats.items()}
 #
-# TODO(5.3): implement. Be careful with slicing: the response starts at T_p - 1 in
-# logits because logits[i] predicts token i+1, so logits[T_p - 1] predicts the first
-# response token.
+# TODO(5.3): implement. The response starts at T_p - 1 in logits because logits[i]
+# predicts token i+1, so logits[T_p - 1] predicts the first response token.
 
 
 # =====================================================================================

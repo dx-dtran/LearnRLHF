@@ -3,9 +3,9 @@
 From-scratch InstructGPT-style RLHF (Ouyang et al. 2022) on GPT-2 small, single 24GB GPU,
 pure PyTorch. No `trl`, no `accelerate`, no `transformers.Trainer`.
 
-By the end you should be able to derive every forward and backward pass in SFT, RM, and PPO
-on paper, re-implement each component from a blank file, and produce a GPT-2 that is visibly
-better at instruction following than the raw pretrained checkpoint.
+The aim is a complete implementation that derives every forward and backward pass in
+SFT, RM, and PPO, can be re-implemented from scratch, and produces a GPT-2 that is
+visibly better at instruction following than the raw pretrained checkpoint.
 
 Style: Karpathy `nanoGPT` + CS231n assignments. Flat `.py` files, minimal abstractions,
 aggressive gradient checking, prose-heavy docstrings.
@@ -21,24 +21,27 @@ pip install -r requirements.txt
 python -m pytest tests/test_grad_check.py -q     # should pass: 3 tests
 ```
 
-HH-RLHF data is downloaded inside `data_hh.download_hh()` — you implement that in Problem 0.2.
+HH-RLHF data is downloaded inside `data_hh.download_hh()`, which is implemented in
+Problem 0.2.
 
 ---
 
 ## 2. Scope
 
 **In scope:**
-- Pure PyTorch. Only deps: `torch`, `tiktoken`, `datasets`, `numpy`, `matplotlib`, `tqdm`.
-- GPT-2 re-implemented (loadable from HuggingFace safetensors) — tied embeddings,
-  learned positional embeddings, LayerNorm w/ affine params, GELU.
-- SFT, Reward Model, PPO — all three phases of InstructGPT.
+- Pure PyTorch. Only deps: `torch`, `tiktoken`, `datasets`, `numpy`, `matplotlib`,
+  `tqdm`.
+- GPT-2 re-implemented (loadable from HuggingFace safetensors): tied embeddings,
+  learned positional embeddings, LayerNorm with affine params, GELU.
+- SFT, Reward Model, PPO. All three phases of InstructGPT.
 - bf16 mixed precision, gradient accumulation, gradient checkpointing.
-- Single-GPU only; `GPTConfig` must let you instantiate `gpt2-medium/large/xl` by
-  changing `n_layer/n_head/n_embd` — even if training them OOMs.
+- Single-GPU only. `GPTConfig` must allow instantiating
+  `gpt2-medium/large/xl` by changing `n_layer/n_head/n_embd`, even if training them
+  OOMs.
 
 **Out of scope:**
-- DDP/FSDP, ZeRO, DeepSpeed, LoRA/PEFT, Flash-Attn kernels. Use
-  `torch.nn.functional.scaled_dot_product_attention` as the one allowed cheat.
+- DDP/FSDP, ZeRO, DeepSpeed, LoRA/PEFT, Flash-Attn kernels. The single allowed shortcut
+  is `torch.nn.functional.scaled_dot_product_attention`.
 - Tokenizer training (use `tiktoken` GPT-2 BPE).
 - Human labeling UI.
 - Evaluation with GPT-4-as-judge.
@@ -82,9 +85,9 @@ notes/               # theory references (read before coding each module)
 For each problem `M.P`:
 
 1. **Read the theory.** Open the relevant `notes/0M-*.md` file and read the derivation
-   for the loss / module you're about to implement. These notes are pre-written theory
-   references; they contain every equation and gradient you'll need. Re-derive the
-   backward passes on paper as you read — if you can't, re-read.
+   for the loss or module about to be implemented. These notes are pre-written theory
+   references; they contain every equation and gradient needed. Re-derive the
+   backward passes on paper while reading.
 2. **Read** the `# TODO(M.P):` block in the skeleton file. The docstring states the
    math and what the tests check.
 3. **Implement** the `TODO`.
@@ -92,21 +95,23 @@ For each problem `M.P`:
    ```bash
    pytest tests/test_grad_ppo.py::test_ppo_policy_loss_grad -q
    ```
-5. **Green means green.** If rel_err is `1e-3` on a loss that should be `1e-6`, find
-   the off-by-one / sign / mask / shift before continuing.
-6. **Annotate.** Each `notes/` file has a "What to commit" section at the end —
-   append your run outputs (loss curves, hparams you changed, surprises) there as you
-   go. Future-you will want them.
+5. **Verify the test really passed.** A `rel_err` of `1e-3` on a loss that should
+   reach `1e-6` indicates an off-by-one, a sign error, or a mask or shift bug.
+   Track it down before continuing.
+6. **Annotate.** Each `notes/` file has a "What to commit" section at the end. Append
+   run outputs (loss curves, hparams that were changed, surprises) there as the work
+   progresses.
 7. **Commit** with `git commit -m "M.P: <one line>"`.
 
-When in doubt: `pytest tests/ -q` and fix the first failing test.
+Default debugging flow: `pytest tests/ -q` and fix the first failing test.
 
 ---
 
 ## 5. Backward passes
 
-Short summaries. Full derivations live in the corresponding `notes/` file — read the
-note before implementing the loss, and re-derive each gradient on paper as you go.
+Short summaries. Full derivations live in the corresponding `notes/` file. Read the
+note before implementing the loss, and re-derive each gradient on paper while
+reading.
 
 **1. Causal LM / SFT.**
 
@@ -131,7 +136,8 @@ $$
 \frac{\partial \mathcal{L}}{\partial r_r} = \sigma(r_r - r_c)
 $$
 
-Note the symmetry: the gradients sum to zero.
+The two gradients are exact negatives of each other, so they sum to zero. Bradley–
+Terry is invariant under a constant shift of both scores.
 
 **3. PPO clipped surrogate.**
 
@@ -145,9 +151,9 @@ $$
 $$
 
 When the clip is active and the clipped branch is the one that would raise the
-objective, $\partial \mathcal{L} / \partial \log \pi_t = 0$.
-When inactive: $\partial \mathcal{L} / \partial \log \pi_t = -A_t \rho_t$. Sign flips
-with $\mathrm{sign}(A_t)$.
+objective, $\partial \mathcal{L} / \partial \log \pi_t = 0$. When inactive,
+$\partial \mathcal{L} / \partial \log \pi_t = -A_t \rho_t$. The sign flips with
+$\mathrm{sign}(A_t)$.
 
 **4. KL penalty (per-token).**
 
@@ -157,10 +163,10 @@ $$
 $$
 
 Token reward: $r_t = r_{\text{RM}} \cdot \mathbf{1}_{t=T} - \beta \cdot \mathrm{KL}_t$.
-Since $\pi^{\text{ref}}$ is frozen: $\partial \mathrm{KL}_t / \partial \log \pi_t = 1$.
+Since $\pi^{\text{ref}}$ is frozen, $\partial \mathrm{KL}_t / \partial \log \pi_t = 1$.
 
-The $k_3$ estimator $(\rho - 1) - \log \rho$ is nonnegative and lower-variance, preferred
-for logging but nonlinear in $\rho$ as a penalty.
+The $k_3$ estimator $(\rho - 1) - \log \rho$ is nonnegative and lower-variance,
+preferred for logging but nonlinear in $\rho$ as a penalty.
 
 **5. Value loss.**
 
@@ -182,14 +188,15 @@ $$
 = -\pi \odot (\log \pi + H)
 $$
 
-Start with coefficient 0; increase if you see premature determinism.
+The default coefficient is 0; raise it if entropy collapses early.
 
 ---
 
 ## 6. Curriculum
 
-Problems must be done in order — later ones import earlier ones. Each ends with a concrete
-artifact (file, test, or plot) and does not start until the previous one is green.
+Problems are done in order; later ones import earlier ones. Each ends with a
+concrete artifact (file, test, or plot). Each problem starts only after the
+previous one is green.
 
 ### Module 0 — Setup
 
@@ -209,10 +216,11 @@ Artifact: `notes/00-data.md` with the output.
 
 **1.1 Config + embeddings.**
 `GPTConfig`, `token_embed + position_embed`. Manual shape assertions.
-Artifact: tiny forward test — random ids → (B, T, C).
+Artifact: tiny forward test, random ids → (B, T, C).
 
 **1.2 LayerNorm by hand.**
-Write LayerNorm with affine params; gradient-check against `torch.nn.LayerNorm` on fp64.
+Write LayerNorm with affine params; gradient-check against `torch.nn.LayerNorm` on
+fp64.
 Artifact: test passes.
 
 **1.3 Causal self-attention, no flash.**
@@ -221,7 +229,7 @@ softmax, weighted sum, `c_proj`. Gradient-check the whole block.
 Artifact: test passes.
 
 **1.4 MLP (GELU, 4× expansion).**
-Grad-check. Note exact vs. tanh approx — GPT-2 uses exact GELU.
+Grad-check. GPT-2 uses exact GELU, not the tanh approximation.
 Artifact: test passes.
 
 **1.5 Transformer block.**
@@ -229,12 +237,14 @@ Pre-LN: `x + attn(ln1(x))`, `x + mlp(ln2(x))`. Grad-check.
 Artifact: test passes.
 
 **1.6 Full GPT-2.**
-Stack blocks, final LN, tie `lm_head.weight = wte.weight`. Forward gives `(B, T, V)` logits.
+Stack blocks, final LN, tie `lm_head.weight = wte.weight`. Forward gives `(B, T, V)`
+logits.
 Artifact: forward shape check.
 
 **1.7 Load HF weights.**
-Download `gpt2` safetensors, map parameter names, transpose Conv1D weights (HF uses Conv1D
-not Linear for `c_attn/c_proj/c_fc`). Assert outputs match HF to `max_abs_diff < 1e-4`.
+Download `gpt2` safetensors, map parameter names, transpose Conv1D weights (HF uses
+Conv1D not Linear for `c_attn/c_proj/c_fc`). Assert outputs match HF to
+`max_abs_diff < 1e-4`.
 Artifact: `notes/01-gpt2.md` with the name-map table; parity test passes.
 
 **1.8 Sampling.**
@@ -247,18 +257,20 @@ Artifact: generates coherent text from a fixed prompt.
 
 **2.1 Chat formatter + tokenizer wrapper.**
 Convert HH multi-turn strings into the `<|im_start|>...<|im_end|>` template. Return
-`input_ids` and `loss_mask` = 1 only on assistant content tokens (inclusive of `<|im_end|>`).
+`input_ids` and `loss_mask` = 1 only on assistant content tokens (inclusive of
+`<|im_end|>`).
 Unit test: hand-craft a 2-turn example and assert mask positions.
 Artifact: test_tokenizer.py passes.
 
 **2.2 Masked causal-LM loss.**
 `sft_loss(logits, labels, loss_mask)`. Derive in `notes/02-sft.md` first.
-Gradient-check w.r.t. logits at fp64; include the "flip a masked token, loss unchanged" test.
+Gradient-check w.r.t. logits at fp64; include the "flip a masked token, loss
+unchanged" test.
 Artifact: test_grad_sft.py passes.
 
 **2.3 SFT DataLoader.**
 Pad to longest-in-batch, return `input_ids`, `labels` (shifted), `loss_mask`,
-`attention_mask`. No `ignore_index=-100` — multiply by the mask explicitly.
+`attention_mask`. No `ignore_index=-100`; multiply by the mask explicitly.
 Artifact: shape/dtype test passes.
 
 **2.4 SFT training loop.**
@@ -282,13 +294,14 @@ Forward returns per-token scalar; reward = value at last non-pad token.
 Artifact: shape test passes.
 
 **3.2 Preference dataset.**
-Tokenize `prompt + chosen` and `prompt + rejected` separately. Return both with attention
-masks and last-token indices.
+Tokenize `prompt + chosen` and `prompt + rejected` separately. Return both with
+attention masks and last-token indices.
 Artifact: dataset shape/dtype test passes.
 
 **3.3 Bradley–Terry loss.**
-$L = -\log \sigma(r_c - r_r)$. Derive $\partial L/\partial r_c$ and $\partial L/\partial r_r$ in `notes/03-rm.md`, including the
-softplus form for numerical stability. Gradient-check at fp64.
+$L = -\log \sigma(r_c - r_r)$. Derive $\partial L/\partial r_c$ and
+$\partial L/\partial r_r$ in `notes/03-rm.md`, including the softplus form for
+numerical stability. Gradient-check at fp64.
 Artifact: test_grad_rm.py passes.
 
 **3.4 RM training loop.**
@@ -297,7 +310,8 @@ Target: ≥ 65% pairwise accuracy. Save `rm.pt`.
 Artifact: `rm.pt` exists; accuracy logged.
 
 **3.5 Reward calibration.**
-Plot histograms of `r_c` and `r_r` on eval. They should overlap but `mean(r_c) > mean(r_r)`.
+Plot histograms of `r_c` and `r_r` on eval. They should overlap but
+`mean(r_c) > mean(r_r)`.
 Artifact: histogram saved; note in `notes/03-rm.md`.
 
 ---
@@ -307,8 +321,8 @@ Artifact: histogram saved; note in `notes/03-rm.md`.
 Each function lives in `ppo_core.py` with its own gradient test.
 
 **4.1 Rollout: `generate_with_logprobs(policy, prompts, max_new_tokens)`.**
-Returns `response_tokens`, `logprobs_old`, `values_old`, `attention_mask`, `response_mask`.
-Single forward per step. Critical: the log-prob at position $t$ must be
+Returns `response_tokens`, `logprobs_old`, `values_old`, `attention_mask`,
+`response_mask`. Single forward per step. The log-prob at position $t$ must be
 
 $$\log p(\mathrm{token}_{t+1} \mid \mathrm{prefix}_{\le t})$$
 
@@ -343,7 +357,8 @@ $$
 $$
 
 Derive piecewise gradient in `notes/04-ppo-policy.md`. Gradient-check at fp64.
-Include edge test where every ratio is clipped — gradient must be zero on those tokens.
+Include an edge test where every ratio is clipped: gradient must be zero on those
+tokens.
 Artifact: test_grad_ppo.py::test_ppo_policy_loss_grad passes.
 
 **4.6 Value loss (clipped).**
@@ -352,12 +367,13 @@ $$
 \mathcal{L}_V = \tfrac{1}{2} \max\left( (V - R)^2, (\mathrm{clip}(V, V_{\text{old}} - \varepsilon_v, V_{\text{old}} + \varepsilon_v) - R)^2 \right) \cdot \mathrm{mask}
 $$
 
-Gradient-check. Explain why clipping value helps early training in `notes/04-ppo-policy.md`.
+Gradient-check. Explain why clipping the value helps early training in
+`notes/04-ppo-policy.md`.
 Artifact: test_grad_ppo.py::test_value_loss_grad passes.
 
 **4.7 Entropy bonus.**
-Mean of $-\sum_a \pi(a) \log \pi(a)$ over masked response tokens. Start at coefficient 0.
-Grad-check.
+Mean of $-\sum_a \pi(a) \log \pi(a)$ over masked response tokens. Start at coefficient
+0. Grad-check.
 Artifact: test_grad_ppo.py::test_entropy_grad passes.
 
 **4.8 Advantage normalization.**
@@ -370,14 +386,15 @@ Artifact: test passes with padded batch.
 ### Module 5 — PPO training loop
 
 **5.1 Model layout and memory map.**
-Instantiate policy, value head (shared backbone, separate head), frozen ref, frozen RM.
-Print param counts and expected bf16 memory. `torch.cuda.max_memory_allocated` after one
-dummy forward must fit within 24GB.
+Instantiate policy, value head (shared backbone, separate head), frozen ref, frozen
+RM. Print param counts and expected bf16 memory.
+`torch.cuda.max_memory_allocated` after one dummy forward must fit within 24GB.
 Artifact: memory printout in `notes/05-ppo.md`.
 
 **5.2 Outer loop (rollout phase).**
-For each iteration: sample a batch of prompts, generate responses, compute ref logprobs
-(no grad), compute RM reward (no grad), run GAE, store in a dict of tensors.
+For each iteration: sample a batch of prompts, generate responses, compute ref
+logprobs (no grad), compute RM reward (no grad), run GAE, store in a dict of
+tensors.
 Artifact: one rollout iteration runs without error.
 
 **5.3 Inner loop (optimize phase).**
@@ -390,10 +407,10 @@ minibatch; $\log \pi^{\text{old}}$ is frozen from rollout.
 Artifact: one full inner loop runs without error.
 
 **5.4 Logging.**
-Per-iter: mean reward, mean KL (k3), policy loss, value loss, entropy, clip fraction, grad
-norm, tokens/sec. Save CSV; emit matplotlib plots every 50 iters.
+Per-iter: mean reward, mean KL (k3), policy loss, value loss, entropy, clip
+fraction, grad norm, tokens/sec. Save CSV; emit matplotlib plots every 50 iters.
 Expected trends: KL up slowly, reward up, entropy down slowly.
-Reward up while KL explodes = reward hacking → lower LR or raise β.
+Reward up while KL explodes indicates reward hacking; lower LR or raise β.
 Artifact: CSV and plots generated after 10 iters.
 
 **5.5 Config scaling.**
@@ -407,7 +424,8 @@ Artifact: memory table in `notes/05-ppo.md`.
 ### Module 6 — Evaluation
 
 **6.1 Generation comparison.**
-`eval.py` emits a markdown table of 20 held-out prompts × 3 models (base, SFT, RLHF).
+`eval.py` emits a markdown table of 20 held-out prompts × 3 models (base, SFT,
+RLHF).
 Artifact: `notes/06-eval.md` with the full table.
 
 **6.2 Win-rate (manual).**
@@ -416,8 +434,8 @@ If not, ablate: lower β, more PPO epochs, longer RM training.
 Artifact: win-rate tally in `notes/06-eval.md`.
 
 **6.3 Retrospective.**
-What was hard, what you'd do differently, which grad check saved you, where the old code
-was wrong.
+What was hard, what to do differently next time, which grad check caught a real bug,
+and where the prior code was wrong.
 Artifact: `notes/06-eval.md` retrospective section.
 
 ---
@@ -428,15 +446,16 @@ Artifact: `notes/06-eval.md` retrospective section.
 
 **RM:** lr=1e-5, bs=32, epochs=1, init from `sft.pt`.
 
-**PPO:** lr=1e-6 (policy) / 1e-5 (value head), rollout batch=64 prompts, response_len=128–256,
-K=4, minibatch=16, γ=1.0 (episodic), λ=0.95, ε=0.2, ε_v=0.2, β=0.02, c_ent=0.0.
+**PPO:** lr=1e-6 (policy) / 1e-5 (value head), rollout batch=64 prompts,
+response_len=128–256, K=4, minibatch=16, γ=1.0 (episodic), λ=0.95, ε=0.2, ε_v=0.2,
+β=0.02, c_ent=0.0.
 
 ---
 
 ## 8. Data: Anthropic HH-RLHF
 
-Source: `Anthropic/hh-rlhf`. Raw format: `{"chosen": str, "rejected": str}` — multi-turn
-dialogues alternating `Human:` / `Assistant:`.
+Source: `Anthropic/hh-rlhf`. Raw format: `{"chosen": str, "rejected": str}` with
+multi-turn dialogues alternating `Human:` / `Assistant:`.
 
 Chat template:
 ```
@@ -448,11 +467,13 @@ Chat template:
 
 Three derived datasets from `data_hh.py`:
 
-1. **SFT:** full chosen dialogue. `loss_mask` = 1 on assistant tokens only (including `<|im_end|>`).
+1. **SFT:** full chosen dialogue. `loss_mask` = 1 on assistant tokens only (including
+   `<|im_end|>`).
 2. **Preference pairs:** `(prompt, chosen_response, rejected_response)` for the RM.
 3. **Prompt-only:** prompts ≤ 512 tok; rollouts ≤ 256 new tokens.
 
-`<|im_start|>` and `<|im_end|>` are not in base GPT-2 BPE — encoded as literal UTF-8 bytes.
+`<|im_start|>` and `<|im_end|>` are not in base GPT-2 BPE; they are encoded as
+literal UTF-8 bytes.
 
 ---
 
@@ -477,7 +498,7 @@ Rough bf16 budget with gradient checkpointing:
 
 ## 10. Gradient-check protocol
 
-Every loss gets a dedicated test. Template:
+Every loss has a dedicated test. Template:
 
 ```python
 def test_<loss>_grad():
@@ -510,14 +531,13 @@ Rules:
 
 ## 11. Debugging tips
 
-- **Grad checks lie only when you lie to them.** If a check passes but training does
-  nothing, the bug is in masking / shift / reduction — check `.shape` and `.sum()` of
-  every mask.
-- **PPO can appear to train while silently broken.** Watch all six logs simultaneously:
+- A passing grad check while training does nothing usually means a masking, shift, or
+  reduction bug. Inspect `.shape` and `.sum()` of every mask.
+- PPO can appear to train while silently broken. Watch all six logs simultaneously:
   reward, KL (k3), policy loss, value loss, entropy, clip fraction.
-- **Alignment bugs in PPO** (logits[t] vs response[t]): write a 3-token example on paper
-  and verify indices before touching code.
-- **If your results don't match expectations**, re-read the gradient derivations in the
+- Alignment bugs in PPO (logits[t] vs response[t]) are common. Write a 3-token
+  example on paper and verify indices before touching code.
+- When results do not match expectations, re-read the gradient derivations in the
   corresponding `notes/` file and verify every mask and index in the backward pass.
 
 ---

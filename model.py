@@ -11,11 +11,11 @@ Modules this file covers:
     1.7  Load HF weights
     1.8  Sampling
 
-Style: nanoGPT. Flat, few abstractions. Write small, write clear, don't optimize.
+Style: nanoGPT. Flat, few abstractions.
 
-We deliberately do NOT use `nn.LayerNorm` in Module 1.2 — you implement it. After you've
-passed the gradient check there, you may switch to `torch.nn.LayerNorm` everywhere else
-for perf (but keep your hand-rolled version around for reference).
+`nn.LayerNorm` is not used in Module 1.2; the implementation is built by hand.
+After the gradient check passes, `torch.nn.LayerNorm` may be used elsewhere for
+performance.
 """
 
 import math
@@ -87,10 +87,10 @@ class CausalSelfAttention(nn.Module):
         reshape -> (B, T, C); c_proj
 
     Hints:
-        - For Module 1.3, implement it with the explicit matmul / masked_fill / softmax
-          chain (that's what you're learning). Only after your grad check passes may you
-          swap in torch.nn.functional.scaled_dot_product_attention for speed.
-        - Never forget contiguous() after a transpose before view().
+        - For Module 1.3, implement with the explicit matmul / masked_fill / softmax
+          chain. Only after the grad check passes may
+          `torch.nn.functional.scaled_dot_product_attention` be substituted for speed.
+        - Call `contiguous()` after a transpose before `view()`.
     """
 
     def __init__(self, config: GPTConfig):
@@ -157,8 +157,8 @@ class Block(nn.Module):
         x = x + attn(ln1(x))
         x = x + mlp(ln2(x))
 
-    TODO(1.5): implement. Use your ManualLayerNorm from 1.2 (or switch to nn.LayerNorm
-    after 1.2's grad check passes — document which one you chose).
+    TODO(1.5): implement. Use ManualLayerNorm from 1.2, or switch to nn.LayerNorm
+    after 1.2's grad check passes. Document the choice.
     """
 
     def __init__(self, config: GPTConfig):
@@ -261,8 +261,8 @@ class GPT(nn.Module):
             - append and continue
 
         Do NOT return log-probs from this function. Sampling-with-logprobs for PPO lives
-        in ppo_core.generate_with_logprobs — a separate function, because PPO needs the
-        logprobs tensor attached to the computational graph (kind of — see 4.1).
+        in `ppo_core.generate_with_logprobs` (a separate function), because PPO needs
+        per-token log-probs recorded under the rollout policy.
         """
         # TODO(1.8)
         raise NotImplementedError("TODO(1.8): GPT.generate")
@@ -308,9 +308,9 @@ def load_gpt2_from_hf(model: GPT, hf_name: str = "gpt2") -> GPT:
     TODO(1.7): implement. Your test (tests/test_model.py::test_hf_parity) will assert
     that your model's logits match HF's on a fixed prompt within abs tol 1e-4.
 
-    Note: we allow `transformers` ONLY for this one weight-load step. If you don't want
-    the dependency, you can instead read `gpt2.safetensors` directly with `safetensors`,
-    or run once in a scratch env to dump a plain state_dict to a .pt file and keep that.
+    Note: `transformers` is permitted only for this weight-load step. To avoid the
+    dependency, read `gpt2.safetensors` directly with `safetensors`, or dump a plain
+    state_dict to a .pt file in a scratch environment once and load that.
     """
     # TODO(1.7)
     raise NotImplementedError("TODO(1.7): load_gpt2_from_hf")
@@ -323,7 +323,7 @@ def load_gpt2_from_hf(model: GPT, hf_name: str = "gpt2") -> GPT:
 class ScalarHead(nn.Module):
     """
     Linear(n_embd, 1) used as either the reward head (Module 3) or the value head
-    (Module 5). Separate instance per purpose — do not share weights between RM and V.
+    (Module 5). Separate instance per purpose; do not share weights between RM and V.
 
     TODO(3.1 / 5.1): implement a trivial __init__ and forward.
     Forward takes hidden states (B, T, C) and returns (B, T) scores.

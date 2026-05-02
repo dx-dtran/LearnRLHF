@@ -17,13 +17,13 @@ Three datasets produced here:
     3) PromptDataset      -> {"prompt_ids", "prompt_mask"}
                               just the prompts for PPO rollouts (<= prompt_max_len).
 
-The raw HH data is two strings per example: `chosen` and `rejected`, both in the shape
+The raw HH data is two strings per example, `chosen` and `rejected`, both shaped:
 
     \\n\\nHuman: ...\\n\\nAssistant: ...\\n\\nHuman: ...\\n\\nAssistant: ...
 
-We translate this into turns = [{"role": "user", "content": "..."}, ...] and then apply
-our chat template from `tokenizer.py`. The last "Assistant:" turn is the one that
-differs between chosen and rejected.
+These are translated into `turns = [{"role": "user", "content": "..."}, ...]` and then
+the chat template from `tokenizer.py` is applied. The last "Assistant:" turn is the
+one that differs between chosen and rejected.
 """
 
 import json
@@ -145,9 +145,9 @@ def sft_collate(batch: List[dict]) -> dict:
 
 class PreferenceDataset(Dataset):
     """
-    Each item is a pair (chosen_full_text, rejected_full_text) tokenized INDEPENDENTLY.
-    The two share their prompt prefix semantically, but tokenizing them separately keeps
-    the code simple (and the reward model doesn't need prefix sharing to work).
+    Each item is a pair (chosen_full_text, rejected_full_text) tokenized independently.
+    The two share their prompt prefix semantically, but tokenizing them separately
+    keeps the code simple. The reward model does not need prefix sharing to work.
 
     Returns dict of python lists; collate handles padding.
 

@@ -73,11 +73,11 @@ def generate_with_logprobs(
         - response_mask[b, t] = 0 for t >= first EOS in row b. Subsequent tokens DO NOT
           contribute to loss (the episode is "done").
 
-    TODO(4.1): implement with a naive per-step forward loop. Clarity > speed here.
+    TODO(4.1): implement with a naive per-step forward loop. Clarity over speed.
 
     Test (tests/test_grad_ppo.py::test_rollout_alignment):
         fix the seed, compare logprobs_old against a recomputation via
-        gather_logprobs(policy(full_ids), shift) — they must match to fp32 tolerance.
+        gather_logprobs(policy(full_ids), shift). They must match to fp32 tolerance.
     """
     raise NotImplementedError("TODO(4.1): generate_with_logprobs")
 
@@ -87,9 +87,9 @@ def gather_logprobs(logits: torch.Tensor, target_ids: torch.Tensor) -> torch.Ten
     Given logits (B, T, V) and target_ids (B, T), return log p(target_t | prefix) at
     each t using log_softmax + gather. Same shape as target_ids.
 
-    NOTE: this gathers token t from position t's logits — it does NOT shift. If your
-    logits come from a forward over [prompt + response] and you want the logprobs of the
-    response tokens, slice logits[:, T_p-1:-1, :] and targets = response_ids.
+    NOTE: this gathers token t from position t's logits and does NOT shift. To get
+    logprobs of response tokens from a forward over [prompt + response], slice
+    `logits[:, T_p-1:-1, :]` and pass `targets = response_ids`.
 
     TODO(4.1): implement (trivial).
     """
@@ -106,8 +106,9 @@ def kl_k1(logprobs: torch.Tensor, ref_logprobs: torch.Tensor) -> torch.Tensor:
 
         kl_t = logprobs_t - ref_logprobs_t       (signed; can be negative on a sample)
 
-    This is an UNBIASED single-sample estimate of KL(π || π_ref) but has nonzero
-    variance and can go negative. It's what InstructGPT uses as the shaping penalty.
+    This is an unbiased single-sample estimate of KL(π || π_ref) but has nonzero
+    variance and can go negative. It is the estimator InstructGPT uses as the shaping
+    penalty.
 
     TODO(4.2): implement.
     """
@@ -122,11 +123,11 @@ def kl_k3(logprobs: torch.Tensor, ref_logprobs: torch.Tensor) -> torch.Tensor:
         inv_r    = exp(-logratio)
         kl3      = (inv_r - 1) + logratio                  (always >= 0, lower variance)
 
-    Use this for LOGGING (it's strictly nonnegative and visually cleaner). Use k1 as the
-    penalty that shapes rewards (unbiased).
+    Use this for LOGGING (always nonnegative, easier to read). Use k1 as the penalty
+    that shapes rewards (unbiased).
 
-    TODO(4.2): implement. Write the derivation in notes/04-ppo-kl.md — why k3 >= 0
-    always, and why its gradient is not what you want for the penalty.
+    TODO(4.2): implement. The derivation in notes/04-ppo-kl.md covers why k3 >= 0
+    always, and why its gradient is not the right one for the penalty.
     """
     raise NotImplementedError("TODO(4.2): kl_k3")
 
@@ -178,12 +179,11 @@ def gae(
         advantages : (B, T)
         returns    : (B, T) = advantages + values        (value target, stop-grad)
 
-    Important: `returns` is used as the regression target for the value loss. It's a
-    function of the CURRENT value estimates, but we treat it as a constant during the
-    backward through L_V (this is standard PPO). Do this implicitly by detaching the
-    input `values` before the GAE math, or by calling gae inside `torch.no_grad()` —
-    the learner should do one of these in train_ppo.py (NOT inside this function;
-    this function must remain pure).
+    Important: `returns` is used as the regression target for the value loss. It is a
+    function of the current value estimates, but it is treated as a constant during
+    the backward through L_V (standard PPO). Do this implicitly by detaching the
+    input `values` before the GAE math, or by calling gae inside `torch.no_grad()`.
+    Pick one of those approaches in train_ppo.py; this function must remain pure.
 
     TODO(4.4): implement.
 
@@ -216,12 +216,12 @@ def ppo_policy_loss(
         return (per_token_L * mask).sum() / mask.sum().clamp_min(1.0)
 
     Gradient intuition (derive in notes/04-ppo-policy.md):
-        - Where the clip is INACTIVE (r in [1-eps, 1+eps], or A says we'd clip the
-          wrong way), gradient of the policy wrt logprobs_new_t is -A_t * r_t.
-        - Where the clip IS active AND it lowers the objective, gradient is zero
-          (clipping throws the token's contribution away).
-        - Sign flips with sign(A_t). A_t > 0 (good action) pushes logprob UP; A_t < 0
-          pushes it down. Classic policy gradient.
+        - Where the clip is INACTIVE (r in [1-eps, 1+eps], or A would push the clip
+          the wrong way), the gradient of the loss wrt logprobs_new_t is -A_t * r_t.
+        - Where the clip IS active AND it lowers the objective, the gradient is zero
+          (clipping discards the token's contribution).
+        - The sign flips with sign(A_t). A_t > 0 (good action) pushes logprob UP;
+          A_t < 0 pushes it down. Standard policy gradient.
 
     TODO(4.5): implement.
 
@@ -253,8 +253,8 @@ def value_loss(
         return (per_t * mask).sum() / mask.sum().clamp_min(1.0)
 
     Why clip: the value net trains faster than the policy during PPO and can overshoot
-    early, which wrecks the advantage estimates used by the policy loss. Clipping
-    prevents giant value jumps inside one rollout batch.
+    early, which corrupts the advantage estimates used by the policy loss. Clipping
+    prevents large value jumps inside one rollout batch.
 
     TODO(4.6): implement + grad check.
     """
@@ -294,7 +294,7 @@ def normalize_advantages(advantages: torch.Tensor, mask: torch.Tensor, eps: floa
         var   = ((advantages - mean) ** 2 * mask).sum() / n
         return (advantages - mean) / (var.sqrt() + eps)
 
-    Careful: do NOT let pad-token garbage pollute the mean/std.
+    Pad-token garbage must not pollute the mean/std.
 
     TODO(4.8): implement.
 

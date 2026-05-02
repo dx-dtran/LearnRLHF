@@ -9,10 +9,10 @@ Every loss in this repo gets a gradient check using centered differences in fp64
     check_grad(loss_fn, x)      # asserts rel_err < 1e-5
 
 Key conventions:
-    - Everything in fp64. Do NOT run grad checks in fp32 — you'll chase noise.
+    - Everything in fp64. Grad checks in fp32 chase numerical noise, not real bugs.
     - Tiny tensors. n_embd=16, heads=2, seq=8, batch=2.
-    - Tolerance 1e-5 relative error is a reasonable default; tighten to 1e-7 for purely
-      linear or quadratic losses, loosen to 1e-4 for anything with a hard clip.
+    - Tolerance 1e-5 relative error is a reasonable default. Tighten to 1e-7 for
+      purely linear or quadratic losses; loosen to 1e-4 for anything with a hard clip.
 """
 
 from typing import Callable

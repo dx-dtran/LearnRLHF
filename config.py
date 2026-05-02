@@ -1,10 +1,10 @@
 """
 Config module (Module 0.1 / 5.5).
 
-One place for every knob. No configs-of-configs, no hydra, no yaml.
+One place for every knob. No nested configs, no hydra, no yaml.
 
-Learners: you should not need to edit this file to do Modules 1–4. You WILL edit it in
-Module 5.5 to add `GPTConfig.from_name("gpt2-medium")` and friends.
+This file does not need to be edited for Modules 1–4. Module 5.5 adds
+`GPTConfig.from_name("gpt2-medium")` and the other size variants.
 """
 
 from dataclasses import dataclass, field
@@ -38,7 +38,7 @@ class GPTConfig:
 
 
 # -------------------------------------------------------------------------------------
-# Training configs (separate dataclass per phase — no config inheritance magic)
+# Training configs: one dataclass per phase, no inheritance.
 # -------------------------------------------------------------------------------------
 
 @dataclass

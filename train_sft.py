@@ -6,15 +6,15 @@ Modules this file covers:
     2.4  SFT training loop
     2.5  (invoked via eval.py)
 
-The InstructGPT-style SFT objective: standard next-token cross-entropy, but ONLY on
+The InstructGPT-style SFT objective: standard next-token cross-entropy, but only on
 assistant-content tokens. Zero gradient through user/system/scaffold tokens.
 
 Derivation (put in notes/02-sft.md before implementing):
     For a single example of length T with mask m in {0,1}^T:
         L = - (1/N) Σ_t  m_t · log p_θ(y_t | x_<t),       N = Σ_t m_t
     Let ℓ_t = CE per position. Then ∂L/∂logits_t = m_t · (softmax(logits_t) - onehot(y_t)) / N.
-    Per-batch, average over examples (we average token-level across the batch, not per
-    example — the usual choice; note it weights long responses more).
+    Averaging is token-level across the batch (the usual choice), not per example.
+    Token-level averaging weights long responses more.
 """
 
 from typing import Tuple
@@ -42,8 +42,8 @@ def sft_loss(
         loss = (nll * loss_mask).sum() / loss_mask.sum().clamp_min(1.0)
         return loss
 
-    Do NOT use `F.cross_entropy(..., ignore_index=-100)`. We want an EXPLICIT mask
-    multiplication so the gradient path is visible.
+    Do NOT use `F.cross_entropy(..., ignore_index=-100)`. The mask is multiplied in
+    explicitly so the gradient path stays visible.
 
     TODO(2.2): implement.
 
@@ -66,9 +66,9 @@ def build_optimizer(
     betas: tuple,
 ) -> torch.optim.Optimizer:
     """
-    Build AdamW with the nanoGPT convention: weight-decay only on 2D parameters
-    (no decay on LayerNorm weights, biases, embedding weights [debatable — GPT-2 often
-    keeps decay on embeddings; here we'll exclude them to match nanoGPT]).
+    Build AdamW with the nanoGPT convention: weight-decay only on 2D parameters.
+    No decay on LayerNorm weights, biases, or embedding weights. (GPT-2 often
+    keeps decay on embeddings; this code excludes them to match nanoGPT.)
 
     TODO(2.4): split model.parameters() into two groups:
         decay  = [p for p in params if p.requires_grad and p.dim() >= 2]
@@ -108,12 +108,12 @@ def train_sft():
         - save to sft.pt
 
     Note on the shift in the loss call: the loader already returns labels as
-    input_ids[t+1], but by convention we compute logits over positions [0..T-1] and
+    input_ids[t+1]. By convention, logits are computed over positions [0..T-1] and
     labels over [0..T-1] aligned (both shifted), hence the `[:, :-1]` slice on logits
-    when labels are already shifted. If your collate does the shift inside, drop the
-    slice. BE EXPLICIT with a comment.
+    when labels are already shifted. If the collate does the shift inside, drop the
+    slice and document the choice with a comment.
 
-    TODO(2.4): implement. Keep it simple — a few dozen lines.
+    TODO(2.4): implement. A few dozen lines suffice.
     """
     raise NotImplementedError("TODO(2.4): train_sft")
 
