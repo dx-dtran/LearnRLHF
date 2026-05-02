@@ -2,8 +2,19 @@
 
 ## Purpose
 
-Theory packet for Problems 4.5, 4.6, and 4.7. Derive and reason about the
-three terms that make up the PPO loss:
+Theory packet for Problems 4.5, 4.6, and 4.7. Companion to
+`04-ppo-gae.md` (which produces per-token advantages from a rollout) and
+`04-ppo-kl.md` (which produces the per-token reward).
+
+By this point in the curriculum, a rollout produces, for every token in
+every sampled response: a token id, the log-probability under the
+*rollout-time* policy, an advantage estimate, a regression target for
+the value head, and a mask telling the loss which positions are real
+response tokens. The job of the present note is to write down the loss
+that turns those tensors into a single scalar, takes a backward pass on
+it, and gradient-checks every piece.
+
+That total loss has three parts:
 
 $$
 L_{\mathrm{PPO}} = L_{\mathrm{policy}} + c_v \cdot L_{\mathrm{value}} - c_{\mathrm{ent}} \cdot H
@@ -13,7 +24,22 @@ Or in code-style:
 
     L_PPO = L_policy + c_v * L_value - c_entropy * H
 
-By the end:
+Each part is derived below in its own section:
+
+- `L_policy` is the **clipped surrogate policy loss**. It pushes
+  positive-advantage tokens toward higher probability and
+  negative-advantage tokens toward lower probability, with a clip that
+  caps how far the new policy can move from the rollout policy in a
+  single update (§2).
+- `L_value` is the **value-head regression loss**. The value head was
+  used in §4-`gae` to compute advantages; here it is trained to predict
+  better in the future (§3).
+- `H` is the **entropy of the policy's per-token distribution**. Adding
+  it with a negative coefficient encourages the policy to keep
+  spreading probability across multiple tokens rather than collapsing
+  to a single argmax (§4).
+
+By the end of this note the objectives are:
 
 1. State the PPO clipped policy loss and derive its piecewise gradient.
 2. Explain why clipping the importance ratio creates a "trust region"
@@ -27,12 +53,6 @@ policy-gradient signal, some have zero gradient because the ratio is
 clipped, some value predictions use the unclipped branch, and some use
 the clipped branch. The tests are designed to force each case to
 happen.
-
-PPO learns from a rollout batch while limiting how much that old batch
-can change the policy. A token with a positive advantage should become
-more likely, and a token with a negative advantage should become less
-likely. The clip prevents a single rollout from pushing the policy too
-far before fresh samples are collected.
 
 ---
 

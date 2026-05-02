@@ -2,16 +2,28 @@
 
 ## Purpose
 
-This note documents the raw HH-RLHF dataset, the chat template used throughout the
-course, and the three derived datasets produced by `data_hh.py` for SFT, the reward
-model, and PPO. It is a data contract rather than a derivation. SFT depends on
+The course has three training phases (introduced in detail in Modules 2, 3, and 5):
+
+- **SFT** (supervised fine-tuning): teach a pretrained GPT-2 to imitate well-formed
+  assistant replies on a chat template.
+- **RM** (reward model): train a small head on top of the SFT model that scores any
+  given (prompt, response) pair, using human preference data.
+- **PPO** (the RL phase): let the SFT model generate fresh responses to prompts,
+  score them with the RM, and update the model to produce higher-scoring responses.
+
+All three phases consume the same raw data, the Anthropic HH-RLHF dataset, but each
+needs the data shaped differently. This note documents the raw dataset, the chat
+template used throughout the course, and the three derived datasets produced by
+`data_hh.py`. It is a data contract rather than a derivation: SFT depends on
 assistant tokens being marked correctly, the reward model depends on chosen and
 rejected responses being paired with the right prompt, and PPO depends on
 prompt-only examples ending exactly where generation should begin.
 
-A row in HH-RLHF contains two possible assistant endings, one preferred by a human.
-The same source row produces three views: a single dialogue for SFT, a pair of
-sequences for the reward model, and a prompt-only example for PPO rollouts.
+A row in HH-RLHF contains two possible assistant endings to the same conversation,
+one preferred by a human. The same source row produces three views: a single
+dialogue for SFT, a pair of sequences (chosen / rejected) for the reward model, and
+a prompt-only example for PPO. ("Rollout" is the PPO term for the procedure of
+sampling a response from the current model on a fresh prompt; see Module 4.)
 
 ---
 

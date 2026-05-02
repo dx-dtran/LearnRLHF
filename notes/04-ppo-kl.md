@@ -3,26 +3,36 @@
 ## Purpose
 
 Theory packet for Problems 4.2 and 4.3 (per-token KL and reward shaping).
-The KL term is short, but it is the largest single source of PPO
-instability on text.
+The KL term is short to write down, but it is the largest single source of
+PPO instability on text, and the math behind it gets brushed past in many
+references.
 
-The KL term is a soft constraint on how far the policy can move from the
-SFT model in a single training run. The reward model points toward
-responses that score better according to learned preferences; the KL
-penalty prices each unit of movement away from the SFT distribution. Most
-PPO failures are failures of this tradeoff: either the policy barely
-moves, or it moves so far that the reward model is no longer a
-trustworthy guide.
+In Module 3 a reward model was trained that scores any (prompt, response)
+pair. Naively, PPO can update the policy ("policy" = the network being
+trained, started from the SFT weights) so it produces responses with the
+highest possible reward-model score. The problem is that the reward model
+was trained on SFT-style responses, so its scoring is only reliable in a
+neighborhood around the SFT distribution. A policy free to drift far from
+SFT will discover responses the RM gives high scores to but humans dislike
+(repeating sycophantic phrases, weird formatting, exact n-grams the RM
+happened to overweight). This phenomenon is called **reward hacking**.
 
-By the end of this note the objectives are:
+The fix is to add a soft penalty for moving away from the SFT model,
+measured as a KL divergence between the policy's per-token distribution
+and the SFT model's per-token distribution. The SFT model is held frozen
+during PPO and is called the **reference model**, written `pi_ref`. The
+penalty is added inside the per-token reward, so every step where the
+policy strays from the reference pays a small cost.
 
-1. State why the KL penalty is included.
-2. Derive three single-sample estimators of KL divergence (`k_1`, `k_2`,
-   `k_3`).
-3. Identify which estimator is used for the reward penalty, which is
-   used for logging, and why.
-4. Write down the per-token reward shaping used in InstructGPT-style
-   PPO.
+This note covers four concrete things:
+
+1. A short primer on KL divergence (§0).
+2. Why a KL-to-reference penalty appears at all (§1).
+3. Three single-sample estimators of KL (`k_1`, `k_2`, `k_3`); which
+   estimator is used for the reward penalty, which is used for logging,
+   and why (§3).
+4. The full reward-shaping formula PPO uses, combining the RM's terminal
+   score with the per-token KL penalty (§4).
 
 ---
 

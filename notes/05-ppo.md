@@ -2,29 +2,46 @@
 
 ## Purpose
 
-Theory and engineering notes for Module 5 (Problems 5.1 through 5.5). The
-math is in `04-*.md`. This note covers:
+Theory and engineering notes for Module 5 (Problems 5.1 through 5.5).
 
-1. The four models that need to be in memory simultaneously, and how to fit
-   them on a 24GB GPU.
-2. The outer / inner loop structure of a PPO iteration.
-3. What to log, and what a healthy training run should look like.
-4. How to make the code work for all four GPT-2 sizes, even if the larger
-   ones OOM.
+By this point Module 4 has provided every individual function PPO needs:
+sampling responses with their log-probs, computing per-token KL, shaping
+rewards, computing advantages with GAE, and the policy / value / entropy
+losses with their gradient checks. Module 5 ties those pieces into one
+training script.
 
-Module 5 is where correct small functions become a training system. The
-individual losses can all pass gradient checks while the full PPO run still
-fails, because tensors are stale, models are in the wrong mode, or logging
-hides the first sign of instability. Treat this note as an execution
+This note covers four practical things that the math notes do not:
+
+1. The four GPT-2 networks that must be in memory simultaneously
+   (trainable policy, value head sharing the policy backbone, frozen
+   reference model, frozen reward model), and how to fit all of them on
+   a single 24GB GPU.
+2. The outer-loop / inner-loop structure of a PPO iteration: one
+   rollout phase that runs without gradients, followed by K epochs of
+   minibatch updates that recompute log-probs and values with gradients
+   on.
+3. What to log every iteration, and what trajectories of those logs
+   indicate a healthy run versus reward hacking, mode collapse, or
+   value-head divergence.
+4. How to make the code work for all four GPT-2 sizes (small, medium,
+   large, XL), even when the large variants run out of memory at full
+   batch size.
+
+Many PPO bugs do not show up as a failed gradient check; they show up
+as wrong tensors flowing into otherwise correct loss functions. Common
+causes are recomputing a quantity at the wrong time (`logprobs_old`
+must be frozen at rollout time, not recomputed each minibatch),
+forgetting `model.eval()` on the reference, or accidentally letting
+gradients into the reward model. Treat this note as an execution
 checklist as well as a theory note.
 
-One PPO iteration: ask the current model to answer prompts, grade those
-answers with the reward model, compare the current model to the frozen SFT
-reference, turn those scores into advantages, and take a few cautious
-optimizer steps. The loop is straightforward; the tensor timestamps are the
-hazard. Old log-probs come from rollout, new log-probs come from the current
-minibatch, reference log-probs come from the frozen SFT copy, and advantages
-come detached from the rollout calculation.
+A one-line summary of one PPO iteration: sample responses from the
+current policy on a batch of prompts, score them with the reward model,
+measure how far the responses' per-token distribution drifted from the
+frozen SFT reference, turn the scores plus the KL penalty into per-token
+advantages, and take a few cautious optimizer steps that nudge the
+policy toward higher-advantage tokens without letting it drift too far
+from the rollout policy in a single update.
 
 ---
 
