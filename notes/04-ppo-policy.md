@@ -703,7 +703,7 @@ numbers look finite.
 After Problems 4.5, 4.6, 4.7, add:
 
 - Your own derivation of the clipped-surrogate piecewise gradient
-  (the table in §2.2, with the algebra written out).
+  (the table in §2.2, with the case-by-case derivation written out).
 - Your own derivation of the entropy gradient (section 4.3 redone by
   hand).
 - The numerical result of your edge test: "with every ratio set to 5

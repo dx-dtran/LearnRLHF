@@ -212,9 +212,10 @@ to be.
 
 The theorem avoids differentiating through the sampling operation.
 Sampling a token is discrete, so ordinary backpropagation cannot pass
-through "which token was chosen." The log-derivative trick moves the
-gradient onto the log-probability assigned to the sampled token. That
-is the core trick behind policy gradients.
+through "which token was chosen." The log-derivative trick sidesteps
+that by moving the gradient onto the log-probability the policy
+assigns to the sampled token, which *is* a continuous, differentiable
+quantity. Every policy-gradient algorithm relies on this rewrite.
 
 ### 2.3 What this means intuitively
 

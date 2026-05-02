@@ -165,7 +165,11 @@ cases.
 
 ## 3. Why mask the prompt?
 
-Two reasons.
+There are two independent reasons to set `loss_mask = 0` on every token
+that is not assistant content. The first reason is about what the model
+learns to *generate* (3.1); the second is about what the loss number
+actually measures during training (3.2). Section 3.3 then states the
+exact rule for which tokens get a 1 and which get a 0.
 
 ### 3.1 User text is not something we want the model to learn to generate
 

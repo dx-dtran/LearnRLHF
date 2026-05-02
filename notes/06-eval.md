@@ -238,11 +238,13 @@ iterations).
 
 ## 3. The retrospective (Problem 6.3)
 
-One page, answering these questions directly.
+One page, answering the questions in §3.1–§3.6 directly.
 
-The retrospective is technical: name the bug, the symptom, the test that
-caught it, and the fix. The catalog of failure modes is the artifact of
-value, since it makes the next RLHF implementation easier.
+Aim for technical specificity rather than reflective prose: for each bug,
+write the symptom, the test that caught it, and the fix that resolved it.
+The output of this section is essentially a personal catalog of RLHF
+failure modes; that catalog is what makes the next from-scratch RLHF
+implementation faster.
 
 ### 3.1 What was the hardest part?
 
@@ -281,8 +283,9 @@ Trace through the git history for bugs caught during development:
 - Was the value loss ever unclipped, or were advantages computed without
   masking?
 
-These are the educational points of the exercise: the actual bugs that
-appear when RLHF is built from scratch, and the methods for catching them.
+These are the bugs that appear when RLHF is built from scratch, and the
+tests and printouts that catch them. Recording one or two specific cases
+makes the retrospective concretely useful.
 
 ### 3.6 What did you not understand before, and what do you understand now?
 
