@@ -2,42 +2,37 @@
 
 ## Purpose
 
-Read this *before* you write `data_hh.py` (Problem 0.2). It's a data contract, not a
-derivation. You're not doing math here — you're figuring out what the dataset looks like,
-what you need to produce from it, and how to format everything consistently.
+This note documents the raw HH-RLHF dataset, the chat template used throughout the
+course, and the three derived datasets produced by `data_hh.py` for SFT, the reward
+model, and PPO. It is a data contract rather than a derivation. SFT depends on
+assistant tokens being marked correctly, the reward model depends on chosen and
+rejected responses being paired with the right prompt, and PPO depends on
+prompt-only examples ending exactly where generation should begin.
 
-Think of this note as the map between raw conversation strings and tensors the training code
-can trust. Every later module depends on this map. SFT needs assistant tokens marked
-correctly. The reward model needs chosen and rejected responses paired with the right prompt.
-PPO needs prompt-only examples to end exactly where generation should begin. If those
-boundaries are wrong, the model can train for hours while solving the wrong problem.
-
-Module 0 is about understanding what each example means before tokenization. A row contains
-two possible assistant endings, one preferred by a human. Your code has to preserve that
-comparison while also producing the three views needed by SFT, RM, and PPO. When a tensor
-looks suspicious three modules later, you should be able to trace it back to the raw HH row
-and know what it was supposed to represent.
+A row in HH-RLHF contains two possible assistant endings, one preferred by a human.
+The same source row produces three views: a single dialogue for SFT, a pair of
+sequences for the reward model, and a prompt-only example for PPO rollouts.
 
 ---
 
 ## 1. What is HH-RLHF?
 
-HH-RLHF stands for "Helpful and Harmless, with RLHF". Anthropic released it alongside
-Bai et al. 2022 ("Training a Helpful and Harmless Assistant with Reinforcement Learning
-from Human Feedback").
+HH-RLHF stands for "Helpful and Harmless, with RLHF". Anthropic released it
+alongside Bai et al. 2022 ("Training a Helpful and Harmless Assistant with
+Reinforcement Learning from Human Feedback").
 
-Each row in the dataset is a pair of conversations. Both conversations start the same
-way (same user questions, same earlier assistant replies), but they end differently —
-one ending was picked by a human labeler as "better", and the other was not. The picked
-one is called **chosen** and the other is called **rejected**.
+Each row in the dataset is a pair of conversations. Both conversations start the
+same way (same user questions, same earlier assistant replies), but they end
+differently. One ending was picked by a human labeler as "better", and the other
+was not. The picked one is called **chosen** and the other is called **rejected**.
 
-That word "better" is deliberately vague. It can mean more helpful, more harmless, more
-truthful, less evasive, better formatted, or more satisfying to the labeler. The reward model
-receives no clean decomposition of those reasons. It sees the pairwise outcome: chosen beat
-rejected. This is why the reward model is a preference model rather than a supervised
-classifier with an absolute target score.
+The criterion "better" is intentionally vague. It can mean more helpful, more
+harmless, more truthful, less evasive, better formatted, or more satisfying to the
+labeler. The reward model receives no decomposition of those reasons. It sees the
+pairwise outcome: chosen beat rejected. For this reason the reward model is a
+preference model rather than a supervised classifier with an absolute target score.
 
-Here is what a raw row looks like:
+A raw row looks like:
 
 ```json
 {
@@ -46,41 +41,40 @@ Here is what a raw row looks like:
 }
 ```
 
-Both strings are the full dialogue, including all earlier turns. Usually only the final
-assistant turn differs between chosen and rejected, but in principle the conversations
-could diverge earlier. The safe mental model is two full trajectories that happen to share
-a prefix.
+Both strings are the full dialogue, including all earlier turns. Usually only the
+final assistant turn differs between chosen and rejected, but the conversations
+may diverge earlier in principle. The safe mental model is two full trajectories
+that share a prefix.
 
-For the teaching implementation, we still usually *extract* a shared prompt and two candidate
-responses. But while doing that extraction, keep the raw fact in mind: the dataset does not
-promise a perfect `(prompt, chosen_response, rejected_response)` schema. Your parsing code
-should be simple, but your debugging mindset should be humble. If a row looks malformed or
-surprising, print it and inspect it rather than forcing it through silently.
+For the teaching implementation, a shared prompt and two candidate responses are
+extracted, but the dataset itself does not promise a perfect
+`(prompt, chosen_response, rejected_response)` schema. Parsing code should be
+simple. When a row is malformed or surprising, print and inspect it rather than
+forcing it through silently.
 
-The dataset is split into two subsets, `helpful-base` and `harmless-base`. For this
-course just use the whole `Anthropic/hh-rlhf` mix — don't bother separating them.
+The dataset is split into two subsets, `helpful-base` and `harmless-base`. For
+this course use the whole `Anthropic/hh-rlhf` mix without separating them.
 
-When you run Problem 0.2, you'll fill in the following statistics for yourself:
+When you run Problem 0.2, fill in the following statistics:
 
 - Number of rows in train and test.
 - How many turns the typical conversation has (most are 1–4 human turns).
-- Token length percentiles (p50, p95, p99) for `chosen` and `rejected`, measured with
-  the GPT-2 BPE tokenizer.
-- Three random samples printed verbatim, just so you've eyeballed real data.
+- Token length percentiles (p50, p95, p99) for `chosen` and `rejected`, measured
+  with the GPT-2 BPE tokenizer.
+- Three random samples printed verbatim.
 
-The random samples are not decoration. They are how you catch assumptions that a percentile
-table hides: extra blank lines, assistant turns that start with refusals, multi-turn contexts
-where the final answer depends on earlier dialogue, and examples whose "rejected" answer is
-not obviously terrible. Preference data is noisy. Looking at actual rows prepares you for
-reward-model accuracy numbers that are good but nowhere near 100%.
+Looking at actual rows surfaces things that a percentile table hides: extra blank
+lines, assistant turns that start with refusals, multi-turn contexts where the
+final answer depends on earlier dialogue, and examples whose "rejected" answer is
+not obviously terrible. Preference data is noisy, which is one reason reward
+models reach pairwise accuracies well below 100%.
 
 ---
 
 ## 2. Chat template
 
-GPT-2 was pretrained on raw web text. It has no concept of "this bit is the user
-talking, this bit is the assistant talking". We have to teach it that by wrapping every
-turn in special role tags. Here is the template we use:
+GPT-2 was pretrained on raw web text and has no representation of speaker roles.
+Role tags are introduced by wrapping every turn:
 
 ```
 <|im_start|>user
@@ -89,44 +83,43 @@ turn in special role tags. Here is the template we use:
 <turn text><|im_end|>
 ```
 
-This format is called ChatML. OpenAI popularized it with their chat models. We'll use
-it everywhere — SFT examples, RM preference pairs, PPO rollouts — so the model sees the
-same structure during every phase of training.
+This format is called ChatML, popularized by OpenAI's chat models. It is used
+everywhere in this course (SFT examples, RM preference pairs, PPO rollouts) so
+the model sees the same structure during every phase of training.
 
-Consistency matters more than the exact template. A model can learn many reasonable chat
-formats, but it struggles when SFT uses one format, RM uses another, and PPO prompts use a
-third. The template is the contract between phases: the SFT model learns to answer after an
-assistant header, the RM learns to score responses in that same frame, and PPO samples from
-prompts that end at exactly that same assistant header.
+The exact template is less important than the consistency of its use. A model
+can learn many reasonable chat formats, but it struggles when SFT uses one
+format, RM uses another, and PPO prompts use a third. The template defines the
+contract between phases: the SFT model learns to answer after an assistant
+header, the RM learns to score responses in that same frame, and PPO samples
+from prompts that end at exactly that same assistant header.
 
 ### Special tokens
 
-`<|im_start|>` and `<|im_end|>` are not real tokens in GPT-2's vocabulary. We have two
-reasonable options:
+`<|im_start|>` and `<|im_end|>` are not real tokens in GPT-2's vocabulary. There
+are two reasonable options:
 
 1. Pick two unused slots in the vocab and treat them as new special tokens.
-2. Just type the literal text `<|im_start|>` and let the BPE tokenizer split it into a
-   handful of ordinary subword tokens (`<`, `|`, `im`, `_start`, `|`, `>`, and so on).
+2. Type the literal text `<|im_start|>` and let the BPE tokenizer split it into
+   ordinary subword tokens (`<`, `|`, `im`, `_start`, `|`, `>`, and so on).
 
-The `train.jsonl` / `test.jsonl` files already in this repo use option (2), so we'll
-stick with option (2) too. It wastes 6–8 tokens per tag instead of 1, but it means we
-don't have to resize the embedding table or do anything custom at tokenization time.
-
-This is a tradeoff between elegance and surface area. Adding real special tokens would make
-the sequences shorter and the boundaries cleaner, but it would also require resizing
-embeddings, deciding how to initialize the new rows, and making sure tied output embeddings
-still behave correctly. For a from-scratch course, those extra mechanics distract from the
-main line. Literal tags are verbose but transparent.
+The `train.jsonl` / `test.jsonl` files in this repo use option (2), and this
+course follows that choice. It costs 6–8 tokens per tag rather than 1, but it
+avoids resizing the embedding table or introducing custom tokenization. Option
+(1) would yield shorter sequences and cleaner boundaries, but would also
+require resizing embeddings, deciding how to initialize the new rows, and
+ensuring tied output embeddings still behave correctly. Those mechanics
+distract from the main line of the curriculum.
 
 ### Role labels
 
-We write the roles as `user` and `assistant`. The raw HH data uses `Human:` and
-`Assistant:` instead, so part of your formatter's job is to translate `Human:` → `user`
-and `Assistant:` → `assistant` while wrapping everything in the ChatML tags.
+The roles are written as `user` and `assistant`. The raw HH data uses `Human:`
+and `Assistant:`, so the formatter translates `Human:` → `user` and
+`Assistant:` → `assistant` while wrapping everything in the ChatML tags.
 
 ### Worked example: raw HH row to chat-formatted string
 
-Pretend the raw HH row is short:
+A short raw HH row:
 
 ```json
 {
@@ -135,7 +128,7 @@ Pretend the raw HH row is short:
 }
 ```
 
-After your formatter applies the ChatML template, the `chosen` side becomes:
+After the formatter applies the ChatML template, the `chosen` side becomes:
 
 ```
 <|im_start|>user
@@ -153,16 +146,16 @@ What is 2+2?<|im_end|>
 I'm not sure.<|im_end|>
 ```
 
-Both share the prompt prefix up through the second `<|im_start|>assistant\n`. From this
-point on, the SFT dataset will use the chosen string, the RM will use both, and the PPO
-prompt-only dataset will keep just the prefix.
+Both share the prompt prefix up through the second `<|im_start|>assistant\n`. From
+this point on, the SFT dataset uses the chosen string, the RM uses both, and the
+PPO prompt-only dataset keeps just the prefix.
 
 ### Worked example: tokens and loss_mask alignment
 
-The full BPE expansion of the chat template is verbose (each `<|im_start|>` literal
-splits into about half a dozen subwords). To make the structure visible, this note uses
-a tiny printed vocab with one token per logical piece. The *real* code uses the actual
-GPT-2 BPE; the alignment rule is the same.
+The full BPE expansion of the chat template is verbose: each `<|im_start|>`
+literal splits into about half a dozen subwords. To make the structure visible,
+this note uses a tiny printed vocab with one token per logical piece. The actual
+code uses the real GPT-2 BPE; the alignment rule is the same.
 
 ```
 toy vocab:
@@ -187,8 +180,8 @@ input_id:  10  11  12  13  14  15  16  17  18  15
                                                 pos 9: closing <|im_end|>
 ```
 
-Now the SFT mask. The rule from §3.1 is "1 only on assistant content, including the
-trailing `<|im_end|>`." Apply it position-by-position:
+The SFT mask. The rule from §3.1 is "1 only on assistant content, including the
+trailing `<|im_end|>`." Applied position-by-position:
 
 ```
 pos:         0   1   2   3   4   5   6   7   8   9
@@ -197,18 +190,20 @@ piece:       U   W   I   2   ?  /U   A   4   .  /A
 loss_mask:   0   0   0   0   0   0   0   1   1   1
 ```
 
-Legend: `U` = user header, `W/I/2/?` = user content, `/U` = user closing `<|im_end|>`,
-`A` = assistant header, `4/.` = assistant content, `/A` = assistant closing `<|im_end|>`.
+Legend: `U` = user header, `W/I/2/?` = user content, `/U` = user closing
+`<|im_end|>`, `A` = assistant header, `4/.` = assistant content, `/A` = assistant
+closing `<|im_end|>`.
 
-Two things to verify when staring at this:
+Two properties of this mask:
 
-- The assistant header at position 6 (`<|im_start|>assistant\n`) is `mask = 0`. Your
-  inference code emits that token; the model never has to predict it.
-- The assistant's closing `<|im_end|>` at position 9 is `mask = 1`. The model must
-  learn when to stop, which means it must learn to emit that closing token.
+- The assistant header at position 6 (`<|im_start|>assistant\n`) is `mask = 0`.
+  The inference code emits that token, so the model never has to predict it.
+- The assistant's closing `<|im_end|>` at position 9 is `mask = 1`. The model
+  must learn when to stop, which means it must learn to emit that closing token.
 
-Module 2 (`02-sft.md`) revisits the same example after the shift to the predict-next
-frame, where the mask attaches to the *target* token rather than the *input* token.
+Module 2 (`02-sft.md`) revisits the same example after the shift to the
+predict-next frame, where the mask attaches to the *target* token rather than
+the *input* token.
 
 ---
 
@@ -218,124 +213,120 @@ One source, three views. All three live in `data_hh.py`.
 
 ### 3.1 SFT dataset
 
-**Purpose.** Teach the base model (a) to produce text in our chat format, and (b) to
-imitate the `chosen` assistant responses.
+**Purpose.** Teach the base model (a) to produce text in our chat format, and
+(b) to imitate the `chosen` assistant responses.
 
-Each example is one full formatted dialogue — the `chosen` string, rewritten into our
-ChatML template. The dataloader returns two tensors:
+Each example is one full formatted dialogue: the `chosen` string rewritten into
+the ChatML template. The dataloader returns two tensors:
 
 - `input_ids`: the whole dialogue tokenized into a 1D sequence.
-- `loss_mask`: a 0/1 sequence of the same length. `loss_mask[t] = 1` only if the token
-  at position `t` is inside an **assistant turn's content**. By "content" we mean the
-  text between the `<|im_start|>assistant\n` header and the following `<|im_end|>`,
-  and we include the `<|im_end|>` itself.
+- `loss_mask`: a 0/1 sequence of the same length. `loss_mask[t] = 1` only if
+  the token at position `t` is inside an **assistant turn's content**. Content
+  means the text between the `<|im_start|>assistant\n` header and the following
+  `<|im_end|>`, including the `<|im_end|>` itself.
 
-This mask is the thing that breaks most often in an SFT implementation. We go deeper
-on it in `02-sft.md`. Downstream, RM and PPO both assume this mask is correct, so
-getting it right here matters a lot.
+This mask is the most common source of bugs in an SFT implementation and is
+covered in detail in `02-sft.md`. RM and PPO both assume this mask is correct.
 
-The rule is: "the model is graded only on tokens that the assistant would have had to type."
-The assistant would not type the user header, the user's message, or the assistant header if
-your inference code supplies that header before generation. It *would* type the assistant
-content and the closing marker that tells generation to stop. That boundary is the core SFT
-data problem.
+The rule is: the model is graded only on tokens that the assistant would have
+had to type. The assistant would not type the user header, the user's message,
+or the assistant header (the inference code supplies that header before
+generation). It would type the assistant content and the closing marker that
+tells generation to stop.
 
 ### 3.2 Preference dataset (for the reward model)
 
-**Purpose.** Train a reward model to assign a scalar "quality score" to a full
-`(prompt, response)` conversation. The loss asks that the score for the chosen response
-be higher than the score for the rejected response, on average.
+**Purpose.** Train a reward model to assign a scalar quality score to a full
+`(prompt, response)` conversation. The loss requires that the score for the
+chosen response be higher than the score for the rejected response, on average.
 
-Each example holds `(prompt, chosen_response, rejected_response)`, where `prompt` is
-the shared prefix up through the last `<|im_start|>assistant\n` header (just before the
-response that differs).
+Each example holds `(prompt, chosen_response, rejected_response)`, where
+`prompt` is the shared prefix up through the last `<|im_start|>assistant\n`
+header (just before the response that differs).
 
-The simplest implementation tokenizes `prompt + chosen_response` and
-`prompt + rejected_response` as two separate sequences. You *could* be clever and
-share work on the prompt prefix, but don't — the extra compute isn't worth the loss of
-clarity for a teaching impl.
+The implementation tokenizes `prompt + chosen_response` and
+`prompt + rejected_response` as two separate sequences. Sharing work on the
+prompt prefix is possible but introduces caching and bookkeeping that are not
+worth the complexity in a teaching implementation.
 
-For each of the two sequences you also return an attention mask and the index of the
-last real (non-pad) token. The RM reads off its scalar score at that index.
+For each of the two sequences the dataloader also returns an attention mask
+and the index of the last real (non-pad) token. The RM reads off its scalar
+score at that index.
 
-The last-token index is not an arbitrary pooling choice. In a causal transformer, the hidden
-state at position `t` has seen only tokens up to `t`. The final non-pad token is the first
-position that has seen the entire prompt and response. If you accidentally pool from the
-first response token, the reward model is judging a response it has not read yet.
+The last-token index is not arbitrary. In a causal transformer, the hidden
+state at position `t` has seen only tokens up to `t`. The final non-pad token
+is the first position that has seen the entire prompt and response. Pooling
+from any earlier position scores a response the model has not finished
+reading.
 
 ### 3.3 Prompt-only dataset (for PPO)
 
-**Purpose.** Hand the policy a batch of prompts it hasn't seen yet, let it generate
-completions, then score those completions with the RM and update the policy. For this
-we need just prompts — no assistant answers attached.
+**Purpose.** Hand the policy a batch of prompts it has not seen, let it
+generate completions, then score those completions with the RM and update the
+policy. This view contains prompts only, with no assistant answers attached.
 
-Each example is a prompt ending with `<|im_start|>assistant\n` and nothing after. That
-header is the signal "your turn to talk, model".
+Each example is a prompt ending with `<|im_start|>assistant\n` and nothing
+after. That header is the signal that the model should generate next.
 
-This is also why prompt-only examples are not just truncated SFT examples. If you leave part
-of the gold assistant answer in the prompt, PPO is no longer learning to generate the answer;
-it is continuing an answer that has already started. If you omit the assistant header, the
-model may continue as the user or produce raw web text. The boundary must be exact.
+Prompt-only examples are not just truncated SFT examples. Leaving part of the
+gold assistant answer in the prompt makes PPO continue an answer that has
+already started, rather than learning to generate one from scratch. Omitting
+the assistant header lets the model continue as the user or produce raw web
+text. The boundary must match the SFT and RM templates exactly.
 
-We want the full context (prompt + generated response) to fit inside GPT-2's 1024-token
-window. We split the budget: keep prompts to at most 512 tokens, and allow the model to
-generate up to 256 new tokens.
+The full context (prompt + generated response) must fit inside GPT-2's
+1024-token window. The default split is: prompts at most 512 tokens, response
+generation at most 256 new tokens.
 
-**Left-pad** the prompts to the max length in the batch. Why left-pad instead of
-right-pad? Because generation starts at the *last* real position of the prompt. If we
-right-padded, the "last real position" would be at a different index for every row,
-and we'd have to index into each row separately. Left-padding puts every row's "next
-token to predict" at the same column, which is much simpler to handle in batched code.
+**Left-pad** the prompts to the max length in the batch. Generation starts at
+the last real position of the prompt. Right-padding would put the last real
+position at a different index for every row, requiring per-row indexing.
+Left-padding aligns every row's "next token to predict" at the same column,
+which simplifies batched code.
 
-Left-padding is slightly unnatural for GPT-style models because pretraining usually used
-contiguous text without padding. But for batched generation it buys a very concrete
-simplification: the final prompt token lines up across the batch. The attention mask still
-prevents pad tokens from being treated as real context, and generation appends real tokens on
-the right. The important thing is to be consistent and to test the first generated log-prob
-against the correct prompt position.
+Left-padding is uncommon for GPT-style models because pretraining used
+contiguous text without padding. The attention mask still prevents pad tokens
+from being treated as real context, and generation appends real tokens on the
+right. The first generated log-prob should be tested against the correct
+prompt position to confirm alignment.
 
 ---
 
 ## 4. Token budget
 
-GPT-2 small has a context window of 1024 tokens. So across all phases we need:
+GPT-2 small has a context window of 1024 tokens, so across all phases:
 
     prompt_tokens + response_tokens  <=  1024
 
-Our default split is:
+The default split is:
 
     prompt_tokens     <=  512
     response_tokens   <=  256
 
-That leaves some headroom and matches the PPO config.
+This leaves headroom and matches the PPO config.
 
-During SFT, some full dialogues exceed 1024 tokens — these are rare but real. When you
-hit one, either drop the example or truncate from the **left** (keep the tail). The
-assistant's final response is what we actually want to train on, so never throw that
-away.
+During SFT, some full dialogues exceed 1024 tokens. These are rare but real.
+When a long example is encountered, either drop it or truncate from the
+**left** (keeping the tail). The assistant's final response is the supervised
+signal and must not be discarded.
 
-Left truncation is a compromise. It may remove useful earlier context, but it preserves the
-part of the example that produces the supervised signal. Right truncation is more dangerous:
-it can chop off the assistant answer or the `<|im_end|>` marker, teaching the model from
-incomplete responses and confusing stop behavior.
+Left truncation may remove useful earlier context. Right truncation can chop
+off the assistant answer or the `<|im_end|>` marker, training the model from
+incomplete responses and corrupting stop behavior.
 
 ---
 
 ## 5. What to commit to `notes/00-data.md`
 
-Fill this file in while you're doing Problem 0.2:
+Fill this file in while doing Problem 0.2:
 
 - Number of train and test rows.
 - A quick histogram of turn counts ("most examples have 1–2 human turns").
 - p50 / p95 / p99 token lengths for chosen, rejected, and prompt-only.
 - Three verbatim samples (truncate if very long).
-- Any oddities you notice (malformed rows, duplicate pairs, weird formatting, etc.).
+- Any oddities (malformed rows, duplicate pairs, weird formatting).
 
-This is your reference file. A month from now, when you're wondering "wait, how long is
-a typical response?", you'll come back to this file. Write it like you'll need to reload
-the dataset's shape into your head quickly.
-
-Good data notes include both numbers and interpretation. "p95 chosen length is 742 tokens"
-is useful; "this means full-dialogue SFT will sometimes need truncation, and PPO prompts must
-reserve response budget" is better. The goal is to connect the raw distribution to concrete
-engineering choices in the dataloaders.
+Useful data notes include both numbers and interpretation. "p95 chosen length
+is 742 tokens" is a fact; "this means full-dialogue SFT will sometimes need
+truncation, and PPO prompts must reserve response budget" connects the
+distribution to a concrete engineering choice in the dataloaders.
