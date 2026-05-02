@@ -2,25 +2,36 @@
 
 ## Purpose
 
-Theory packet for Module 2 (Problems 2.1 through 2.5). The objectives:
+Theory packet for Module 2 (Problems 2.1 through 2.5). The goal of Module 2 is
+to take a pretrained GPT-2 and fine-tune it so that, given a user message in
+the chat format from Module 0, it produces an assistant reply that resembles
+the "chosen" replies from HH-RLHF.
+
+The training objective is the same next-token cross-entropy loss GPT-2 was
+pretrained with. Two things change relative to pretraining:
+
+1. The data is formatted dialogues rather than raw web text.
+2. The loss is only counted on tokens that come from the assistant. Tokens
+   that come from the user (and the chat-template scaffolding around them)
+   are excluded from the loss via a per-position **loss mask**.
+
+By the end of this note the objectives are:
 
 1. Write down the SFT loss and explain what every piece of it means in words.
 2. Derive the gradient of softmax + cross-entropy with respect to the logits.
 3. Explain which tokens the `loss_mask` zeros out and why.
 
-SFT is the easiest of the three training phases, but the masking logic is
-*critical*. A single off-by-one or inverted mask quietly corrupts every
+SFT is the simplest of the three training phases, but the masking logic is
+critical. A single off-by-one or inverted mask quietly corrupts every
 downstream phase, since RM and PPO both assume SFT was done correctly.
 
-This module establishes a habit that carries through the rest of the repo: state
-the tensor contract before writing the code. For SFT, the contract is "logits
-predict the next token, labels are shifted by one, and the mask is attached to
-the token being predicted." Almost every bug in this module is a violation of
-one of those three clauses.
-
-SFT is ordinary supervised learning with a careful grading rule: train on
-examples of good assistant behavior, and count loss only on the assistant
-parts. The `loss_mask` selects which tokens count.
+Before writing the code in each problem, state the **tensor contract**:
+which tensors come in, what their shapes are, and what each one means. For
+the SFT loss the contract is "logits predict the next token, labels are
+shifted by one position relative to the input, and the mask is attached to
+the token being predicted (not to the input token at the same position)."
+Almost every bug in this module is a violation of one of those three
+clauses.
 
 ---
 
@@ -154,7 +165,11 @@ cases.
 
 ## 3. Why mask the prompt?
 
-Two reasons.
+There are two independent reasons to set `loss_mask = 0` on every token
+that is not assistant content. The first reason is about what the model
+learns to *generate* (3.1); the second is about what the loss number
+actually measures during training (3.2). Section 3.3 then states the
+exact rule for which tokens get a 1 and which get a 0.
 
 ### 3.1 User text is not something we want the model to learn to generate
 

@@ -2,24 +2,45 @@
 
 ## Purpose
 
-Methodology for Module 6 (Problems 6.1 through 6.3). The math from previous
-modules does not appear here. This note covers:
+Methodology for Module 6 (Problems 6.1 through 6.3). After Modules 1–5,
+three checkpoints exist on disk:
 
-1. How to compare three models (base vs SFT vs RLHF) under matched conditions.
-2. How to compute a win-rate from blinded pairwise annotations.
-3. What to record in the retrospective.
+- **base**: the raw pretrained GPT-2 from Hugging Face.
+- **sft**: the SFT checkpoint from Module 2.
+- **rlhf**: the PPO-trained policy from Module 5.
 
-Fill this file in with actual outputs while running the problems.
+Module 6 compares the three, qualitatively and via a small win-rate
+study. There is no new math here; the work is methodology and reading
+outputs by hand.
 
-The evaluation step replaces optimization proxies (training loss, reward, KL,
-win-rate proxies) with direct reading of model output. Those proxies are
-useful, but the final question is whether the assistant follows instructions
-better than the previous version.
+This note covers three things:
 
-Base GPT-2 illustrates why instruction tuning is needed at all. SFT shows what
-imitation buys. RLHF shows whether optimizing the learned preference signal
-improved answers beyond imitation, or whether it mostly changed their style.
-The side-by-side table is where those differences become visible.
+1. How to generate side-by-side responses from the three models on a
+   shared set of held-out prompts (Problem 6.1).
+2. How to compute a win-rate by blindly comparing SFT vs RLHF responses
+   pair-by-pair (Problem 6.2).
+3. What to record in the retrospective (Problem 6.3).
+
+Fill this file in with the actual outputs while running each problem.
+
+Why bother with by-hand evaluation when training already logs reward,
+KL, and win-rate proxies? Because those numbers are *proxies*. The
+reward model is itself a learned approximation of human preference, so
+"reward went up" only confirms the policy got better at the proxy.
+Reading actual generations is the only way to verify the policy got
+better at the underlying task (following instructions). Each of the
+three checkpoints answers a different question:
+
+- **base** illustrates why instruction tuning was needed in the first
+  place: the raw pretrained model often hallucinates new user turns,
+  ignores the assistant role, or rambles.
+- **sft** shows what supervised imitation alone buys: responses in the
+  right format and broadly on-topic, but often generic or under-helpful.
+- **rlhf** shows whether optimizing the learned preference signal
+  produced answers that are noticeably better than imitation, or
+  whether it mostly changed surface style without improving content.
+
+The side-by-side table in §1 is where those differences become visible.
 
 ---
 
@@ -217,11 +238,13 @@ iterations).
 
 ## 3. The retrospective (Problem 6.3)
 
-One page, answering these questions directly.
+One page, answering the questions in §3.1–§3.6 directly.
 
-The retrospective is technical: name the bug, the symptom, the test that
-caught it, and the fix. The catalog of failure modes is the artifact of
-value, since it makes the next RLHF implementation easier.
+Aim for technical specificity rather than reflective prose: for each bug,
+write the symptom, the test that caught it, and the fix that resolved it.
+The output of this section is essentially a personal catalog of RLHF
+failure modes; that catalog is what makes the next from-scratch RLHF
+implementation faster.
 
 ### 3.1 What was the hardest part?
 
@@ -260,8 +283,9 @@ Trace through the git history for bugs caught during development:
 - Was the value loss ever unclipped, or were advantages computed without
   masking?
 
-These are the educational points of the exercise: the actual bugs that
-appear when RLHF is built from scratch, and the methods for catching them.
+These are the bugs that appear when RLHF is built from scratch, and the
+tests and printouts that catch them. Recording one or two specific cases
+makes the retrospective concretely useful.
 
 ### 3.6 What did you not understand before, and what do you understand now?
 

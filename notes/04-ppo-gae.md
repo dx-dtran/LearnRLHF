@@ -2,31 +2,44 @@
 
 ## Purpose
 
-Theory packet for Problem 4.4 (and the conceptual backbone for all of
-Module 4). This file covers:
+Theory packet for Problem 4.4, and the conceptual backbone for all of
+Module 4. PPO has its own notation and its own machinery, almost none of
+which has appeared in earlier modules. This note builds it up gradually.
 
-1. The policy gradient theorem.
-2. Why a baseline is subtracted (variance reduction).
-3. The bias–variance tradeoff between one-step TD and full Monte Carlo
-   returns.
-4. GAE, the recursion that interpolates between those two extremes.
-5. How all of this works for per-token rewards on text.
+A reader can think of one PPO iteration as the following loop:
 
-Related notes: `04-ppo-kl.md` (the KL penalty) and `04-ppo-policy.md`
-(the PPO clipped surrogate, value loss, entropy). Read those after this
-one.
+1. Pick a batch of prompts.
+2. Sample a response from the current model for each prompt. ("Rollout.")
+3. Score each response with the reward model (Module 3) and combine that
+   score with a small per-token KL penalty (next note, `04-ppo-kl.md`).
+   The result is a per-token reward signal.
+4. From the per-token rewards, compute, for every token in every response,
+   a number called the **advantage**: roughly, "did sampling this exact
+   token at this position turn out better or worse than expected?"
+5. Update the model so tokens with positive advantage become a little more
+   likely and tokens with negative advantage become a little less likely.
 
-This note connects "we sampled text and assigned rewards" to "we have a
-tensor called `advantages` that PPO can optimize." Wrong advantage
-estimates push tokens in the wrong direction with confidence, so GAE
-gets its own note and its own tests.
+Step 5 is the policy update; its loss function is in the companion note
+`04-ppo-policy.md`. This note covers steps 1–4: how the per-token reward is
+turned into the per-token advantage. The path from rewards to advantages
+takes some setup because there is no obvious right answer; the construction
+chains together the policy gradient theorem, a variance-reduction trick
+(subtracting a baseline), and a method for trading off bias against
+variance called Generalized Advantage Estimation (GAE).
 
-For every generated token, PPO needs to decide whether that exact token
-should become more likely next time. The advantage answers that.
-Positive advantage means the token led to a better outcome than
-expected. Negative advantage means the token led to a worse outcome
-than expected. GAE turns delayed rewards, value predictions, and masks
-into those per-token signals.
+Sections in this note:
+
+1. Notation for treating one assistant rollout as an RL "episode".
+2. The policy gradient theorem (where the loss in step 5 above comes from).
+3. Baselines, the value function, and why subtracting them lowers variance.
+4. The bias–variance spectrum between one-step temporal-difference (TD)
+   and full Monte Carlo returns.
+5. GAE, a single tunable knob that interpolates between (4)'s extremes.
+6. How everything composes for per-token text rewards.
+7. Advantage normalization (Problem 4.8).
+
+If a term in this list is unfamiliar (TD, Monte Carlo, baseline), do not
+worry. Each is defined in the section it belongs to before being used.
 
 ---
 
@@ -199,9 +212,10 @@ to be.
 
 The theorem avoids differentiating through the sampling operation.
 Sampling a token is discrete, so ordinary backpropagation cannot pass
-through "which token was chosen." The log-derivative trick moves the
-gradient onto the log-probability assigned to the sampled token. That
-is the core trick behind policy gradients.
+through "which token was chosen." The log-derivative trick sidesteps
+that by moving the gradient onto the log-probability the policy
+assigns to the sampled token, which *is* a continuous, differentiable
+quantity. Every policy-gradient algorithm relies on this rewrite.
 
 ### 2.3 What this means intuitively
 
