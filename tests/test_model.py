@@ -21,7 +21,6 @@ from model import (
     ManualLayerNorm,
 )
 
-
 TINY = GPTConfig(
     block_size=32,
     vocab_size=64,
@@ -37,6 +36,7 @@ TINY = GPTConfig(
 # Problem 1.2
 # -------------------------------------------------------------------------------------
 
+
 def test_manual_layernorm_matches_torch():
     torch.manual_seed(0)
     C = 16
@@ -49,8 +49,9 @@ def test_manual_layernorm_matches_torch():
     x = torch.randn(4, 8, C, dtype=torch.float64, requires_grad=True)
     y_ours = ln_ours(x)
     y_ref = ln_ref(x)
-    assert torch.allclose(y_ours, y_ref, atol=1e-10), \
-        f"max diff = {(y_ours - y_ref).abs().max().item()}"
+    assert torch.allclose(
+        y_ours, y_ref, atol=1e-10
+    ), f"max diff = {(y_ours - y_ref).abs().max().item()}"
 
     # backward parity on parameter grads
     g = torch.randn_like(y_ours)
@@ -68,6 +69,7 @@ def test_manual_layernorm_matches_torch():
 # -------------------------------------------------------------------------------------
 # Problem 1.3 / 1.4 / 1.5 — shape smoke tests (quick)
 # -------------------------------------------------------------------------------------
+
 
 def test_attention_shapes():
     torch.manual_seed(0)
@@ -89,8 +91,9 @@ def test_attention_is_causal():
     x2 = x.clone()
     x2[0, -1, :] += 7.0  # perturb last position
     y2 = attn(x2)
-    assert torch.allclose(y1[0, :-1], y2[0, :-1], atol=1e-6), \
-        "changing token at position t should not affect positions < t (causal)"
+    assert torch.allclose(
+        y1[0, :-1], y2[0, :-1], atol=1e-6
+    ), "changing token at position t should not affect positions < t (causal)"
 
 
 def test_mlp_shapes():
@@ -110,6 +113,7 @@ def test_block_shapes():
 # -------------------------------------------------------------------------------------
 # Problem 1.6 — full GPT
 # -------------------------------------------------------------------------------------
+
 
 def test_gpt_forward_shapes():
     torch.manual_seed(0)
@@ -133,12 +137,15 @@ def test_gpt_tied_embeddings():
     n_params = sum(p.numel() for p in m.parameters())
     # Upper bound if UNtied: 2 * V * C + ...; tied: V*C + ...
     # Just assert param id: no `lm_head` linear registered
-    assert not hasattr(m, "lm_head"), "tie wte with logits; don't register a separate lm_head"
+    assert not hasattr(
+        m, "lm_head"
+    ), "tie wte with logits; don't register a separate lm_head"
 
 
 # -------------------------------------------------------------------------------------
 # Problem 1.7 — HF parity (slow, optional)
 # -------------------------------------------------------------------------------------
+
 
 @pytest.mark.slow
 def test_hf_parity():
@@ -149,6 +156,7 @@ def test_hf_parity():
     model = GPT(cfg).eval()
 
     from model import load_gpt2_from_hf
+
     load_gpt2_from_hf(model, "gpt2")
 
     hf = GPT2LMHeadModel.from_pretrained("gpt2").eval()
@@ -165,6 +173,7 @@ def test_hf_parity():
 # -------------------------------------------------------------------------------------
 # Problem 1.8 — sampling
 # -------------------------------------------------------------------------------------
+
 
 def test_generate_produces_correct_length():
     torch.manual_seed(0)

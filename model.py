@@ -25,10 +25,10 @@ import torch.nn.functional as F
 
 from config import GPTConfig
 
-
 # =====================================================================================
 # Problem 1.2 — LayerNorm by hand
 # =====================================================================================
+
 
 class ManualLayerNorm(nn.Module):
     """
@@ -47,7 +47,7 @@ class ManualLayerNorm(nn.Module):
         - gamma / beta shape = (n_embd,), affine always on for GPT-2.
         - eps = 1e-5 to match HF.
 
-    TODO(1.2): implement __init__ and forward. Your unit test will compare against
+    (1.2): implement __init__ and forward. Your unit test will compare against
     torch.nn.LayerNorm on random fp64 inputs: max abs diff < 1e-10 forward,
     < 1e-6 relative on parameter gradients.
     """
@@ -55,17 +55,23 @@ class ManualLayerNorm(nn.Module):
     def __init__(self, n_embd: int, eps: float = 1e-5):
         super().__init__()
         self.eps = eps
-        # TODO(1.2): create self.weight (init 1s) and self.bias (init 0s) of shape (n_embd,)
-        raise NotImplementedError("TODO(1.2): ManualLayerNorm.__init__")
+        # (1.2): create self.weight (init 1s) and self.bias (init 0s) of shape (n_embd,)
+        self.weight = nn.Parameter(torch.ones(n_embd))
+        self.bias = nn.Parameter(torch.zeros(n_embd))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO(1.2): compute LN by hand. No calls to F.layer_norm or torch.nn.LayerNorm.
-        raise NotImplementedError("TODO(1.2): ManualLayerNorm.forward")
+        # (1.2): compute LN by hand. No calls to F.layer_norm or torch.nn.LayerNorm.
+        dim = x.size(dim=-1)
+        mu = (x.sum(dim=-1) / dim).unsqueeze(dim=-1)
+        variance = (((x - mu) ** 2).sum(dim=-1) / dim).unsqueeze(dim=-1)
+        x_hat = (x - mu) / torch.sqrt(variance + self.eps)
+        return self.weight * x_hat + self.bias
 
 
 # =====================================================================================
 # Problem 1.3 — Causal self-attention
 # =====================================================================================
+
 
 class CausalSelfAttention(nn.Module):
     """
@@ -109,7 +115,9 @@ class CausalSelfAttention(nn.Module):
 
         raise NotImplementedError("TODO(1.3): CausalSelfAttention.__init__")
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """
         Args:
             x:              (B, T, C)
@@ -125,6 +133,7 @@ class CausalSelfAttention(nn.Module):
 # =====================================================================================
 # Problem 1.4 — MLP (GELU 4x)
 # =====================================================================================
+
 
 class MLP(nn.Module):
     """
@@ -150,6 +159,7 @@ class MLP(nn.Module):
 # Problem 1.5 — Transformer block (pre-LN residual)
 # =====================================================================================
 
+
 class Block(nn.Module):
     """
     Pre-LN transformer block (GPT-2 style, NOT post-LN like the original Transformer):
@@ -166,7 +176,9 @@ class Block(nn.Module):
         # TODO(1.5): self.ln_1, self.attn, self.ln_2, self.mlp
         raise NotImplementedError("TODO(1.5): Block.__init__")
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         # TODO(1.5)
         raise NotImplementedError("TODO(1.5): Block.forward")
 
@@ -174,6 +186,7 @@ class Block(nn.Module):
 # =====================================================================================
 # Problem 1.6 — Full GPT-2
 # =====================================================================================
+
 
 class GPT(nn.Module):
     """
@@ -272,6 +285,7 @@ class GPT(nn.Module):
 # Problem 1.7 — Load HF weights
 # =====================================================================================
 
+
 def load_gpt2_from_hf(model: GPT, hf_name: str = "gpt2") -> GPT:
     """
     Load HuggingFace GPT-2 weights into our `model` in place.
@@ -319,6 +333,7 @@ def load_gpt2_from_hf(model: GPT, hf_name: str = "gpt2") -> GPT:
 # =====================================================================================
 # Problem 3.1 — Reward model head / value head (tiny wrappers)
 # =====================================================================================
+
 
 class ScalarHead(nn.Module):
     """
