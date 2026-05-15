@@ -61,9 +61,8 @@ class ManualLayerNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # (1.2): compute LN by hand. No calls to F.layer_norm or torch.nn.LayerNorm.
-        dim = x.size(dim=-1)
-        mu = (x.sum(dim=-1) / dim).unsqueeze(dim=-1)
-        variance = (((x - mu) ** 2).sum(dim=-1) / dim).unsqueeze(dim=-1)
+        mu = x.mean(dim=-1, keepdim=True)
+        variance = ((x - mu) ** 2).mean(dim=-1, keepdim=True)
         x_hat = (x - mu) / torch.sqrt(variance + self.eps)
         return self.weight * x_hat + self.bias
 
@@ -107,13 +106,17 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = config.n_embd // config.n_head
         self.block_size = config.block_size
 
-        # TODO(1.3): create self.c_attn and self.c_proj
+        # (1.3): create self.c_attn and self.c_proj
         # Both use `bias=config.bias` (True for GPT-2).
+        self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=True)
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=True)
 
         # Register a causal mask buffer you can slice with [:T, :T].
-        # TODO(1.3): self.register_buffer("causal_mask", torch.tril(torch.ones(T, T)).bool())
-
-        raise NotImplementedError("TODO(1.3): CausalSelfAttention.__init__")
+        # (1.3): self.register_buffer("causal_mask", torch.tril(torch.ones(T, T)).bool())
+        self.register_buffer(
+            "causal_mask",
+            torch.tril(torch.ones(self.block_size, self.block_size)).bool(),
+        )
 
     def forward(
         self, x: torch.Tensor, attention_mask: torch.Tensor | None = None
@@ -126,8 +129,30 @@ class CausalSelfAttention(nn.Module):
         Returns:
             y: (B, T, C)
         """
-        # TODO(1.3): implement.
-        raise NotImplementedError("TODO(1.3): CausalSelfAttention.forward")
+        # (1.3): implement.
+
+        batch_size, seq_len, n_embd = x.size()
+
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(qkv.size(-1) // 3, dim=-1)
+        q = q.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+
+        att = q.matmul(k.transpose(-1, -2)) / (self.head_dim**0.5)
+        att = att.masked_fill(~self.causal_mask[:seq_len, :seq_len], float("-inf"))
+
+        if attention_mask is not None:
+            attention_mask = attention_mask[:, None, None, :]
+            att = att.masked_fill(attention_mask == 0, float("-inf"))
+
+        scores = F.softmax(att, dim=-1)
+        out = scores.matmul(v)
+
+        out = out.transpose(1, 2)
+        out = out.reshape(batch_size, seq_len, self.n_head * self.head_dim)
+
+        return out
 
 
 # =====================================================================================
