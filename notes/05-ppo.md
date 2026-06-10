@@ -2,12 +2,13 @@
 
 ## Purpose
 
-Theory and engineering notes for Module 5 (Problems 5.1 through 5.5).
+Theory and engineering notes for Part 5: the PPO training run. The loop
+itself is provided in `train_ppo.py`; read these notes alongside that file.
 
-By this point Module 4 has provided every individual function PPO needs:
+By this point Part 4 has provided every individual function PPO needs:
 sampling responses with their log-probs, computing per-token KL, shaping
 rewards, computing advantages with GAE, and the policy / value / entropy
-losses with their gradient checks. Module 5 ties those pieces into one
+losses with their gradient checks. The provided `train_ppo.py` ties those pieces into one
 training script.
 
 This note covers four practical things that the math notes do not:
@@ -96,7 +97,7 @@ which is a conservative starting baseline.
 
 ---
 
-## 2. Memory budget (Problem 5.1)
+## 2. Memory budget
 
 bf16 mixed precision throughout. Fp32 master weights and AdamW state are
 stored only for trainable parameters. Activations are gradient-checkpointed.
@@ -172,7 +173,7 @@ Weights and optimizer state both scale roughly linearly, so medium is about
 - Possibly smaller `response_max_len` (128 instead of 256).
 - Gradient checkpointing definitely on.
 
-### 2.3 Memory check script (Problem 5.1)
+### 2.3 Memory check script
 
 Write a small script that instantiates all four models, runs one dummy
 forward, and prints `torch.cuda.max_memory_allocated()`. Log the output
@@ -185,7 +186,7 @@ those conditions is hard to interpret later.
 
 ---
 
-## 3. The outer loop (Problem 5.2)
+## 3. The outer loop (`rollout` in train_ppo.py)
 
 One PPO iteration has two phases: a **rollout** phase (no gradients,
 generate data) and an **optimize** phase (K epochs of gradient steps on
@@ -295,7 +296,7 @@ Two checks worth doing in code:
 
 ---
 
-## 4. The inner loop (Problem 5.3)
+## 4. The inner loop (`optimize` in train_ppo.py)
 
 ### 4.1 Minibatch sampling
 
@@ -340,7 +341,7 @@ gradient norm, take one optimizer step.
 
 ---
 
-## 5. Logging (Problem 5.4)
+## 5. Logging
 
 Log at least the following per outer iteration. A CSV with one row per
 iteration is enough; emit matplotlib plots every 50 iterations to inspect
@@ -428,7 +429,7 @@ on a held-out batch. Make one change per run.
 
 ---
 
-## 6. Config scaling (Problem 5.5)
+## 6. Config scaling (`GPTConfig.from_name`)
 
 Add a classmethod to `GPTConfig`:
 
@@ -461,7 +462,7 @@ code fragile.
 
 ## 7. What to commit to `notes/05-ppo.md`
 
-After Module 5, add:
+After Part 5, add:
 
 - Memory printout table for each GPT-2 size that fits.
 - One training run's CSV (head and tail rows at least), or plots of

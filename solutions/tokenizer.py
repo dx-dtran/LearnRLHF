@@ -117,12 +117,22 @@ def build_sft_example(turns: List[dict]) -> Tuple[List[int], List[int]]:
     Do NOT search for tag ids in an already-encoded stream; BPE merges across
     boundaries make that unreliable. Encoding chunks separately is the whole trick.
     """
-    # ================================ YOUR CODE (~12 lines) =========================
-    # Build input_ids and loss_mask in parallel, turn by turn, following the
-    # strategy above. Remember the trailing EOT_ID (mask 1) after a final
-    # assistant turn.
-    # ================================================================================
-    raise NotImplementedError("[FILL 2.1] build_sft_example")
+    input_ids: List[int] = []
+    loss_mask: List[int] = []
+    for t in turns:
+        scaffold = encode(f"{IM_START}{t['role']}\n")
+        input_ids += scaffold
+        loss_mask += [0] * len(scaffold)
+
+        content = encode(f"{t['content']}{IM_END}\n")
+        bit = 1 if t["role"] == "assistant" else 0
+        input_ids += content
+        loss_mask += [bit] * len(content)
+
+    if turns and turns[-1]["role"] == "assistant":
+        input_ids.append(EOT_ID)
+        loss_mask.append(1)
+    return input_ids, loss_mask
 
 
 def count_tokens_in_chat(turns: List[dict]) -> int:

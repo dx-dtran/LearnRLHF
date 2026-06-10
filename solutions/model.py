@@ -126,19 +126,24 @@ class CausalSelfAttention(nn.Module):
         """
         batch_size, seq_len, n_embd = x.size()
 
-        # ================================ YOUR CODE (~12 lines) =====================
-        # You wrote most of this in an earlier pass — note the earlier version had a
-        # bug: it never applied c_proj. test_attention_matches_reference catches it.
-        # 1. qkv = self.c_attn(x); split into q, k, v; reshape each to
-        #    (B, n_head, T, head_dim)
-        # 2. att = q @ k^T / sqrt(head_dim)
-        # 3. causal mask with self.causal_mask[:T, :T] -> fill float("-inf")
-        # 4. if attention_mask is not None: fill pad KEY columns with
-        #    torch.finfo(att.dtype).min (finite! a fully-masked pad query row would
-        #    softmax -inf into NaN)
-        # 5. softmax, weighted sum with v, reshape back to (B, T, C), then c_proj
-        # ============================================================================
-        raise NotImplementedError("[FILL 1.1] CausalSelfAttention.forward")
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.n_embd, dim=-1)
+        q = q.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+
+        att = q.matmul(k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+        att = att.masked_fill(~self.causal_mask[:seq_len, :seq_len], float("-inf"))
+        if attention_mask is not None:
+            # mask pad KEYS; large finite negative so pad QUERY rows stay NaN-free
+            pad = attention_mask[:, None, None, :] == 0
+            att = att.masked_fill(pad, torch.finfo(att.dtype).min)
+
+        scores = F.softmax(att, dim=-1)
+        out = scores.matmul(v)
+
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, n_embd)
+        return self.c_proj(out)
 
 
 # =====================================================================================
@@ -240,14 +245,16 @@ class GPT(nn.Module):
         """
         B, T = idx.shape
         assert T <= self.config.block_size
-
-        # ================================ YOUR CODE (~6 lines) ======================
-        # Follow the recipe in the docstring. positions_from_mask is defined at the
-        # top of this file. (If you want gradient checkpointing for the PPO memory
-        # budget later, wrap each block call in torch.utils.checkpoint.checkpoint
-        # when self.config.gradient_checkpointing and self.training — optional.)
-        # ============================================================================
-        raise NotImplementedError("[FILL 1.2] GPT.forward_hidden")
+        pos = positions_from_mask(idx, attention_mask)
+        x = self.drop(self.wte(idx) + self.wpe(pos))
+        for block in self.h:
+            if self.config.gradient_checkpointing and self.training:
+                x = torch.utils.checkpoint.checkpoint(
+                    block, x, attention_mask, use_reentrant=False
+                )
+            else:
+                x = block(x, attention_mask)
+        return self.ln_f(x)
 
     def forward(
         self,

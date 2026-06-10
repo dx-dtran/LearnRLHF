@@ -74,3 +74,10 @@ def test_flip_user_content_preserves_mask_positions():
     assert sum(mask_a) > 0 and sum(mask_b) > 0
     assert sum(m == 0 for m in mask_a) > 0
     assert sum(m == 0 for m in mask_b) > 0
+
+def test_final_assistant_turn_gets_eot():
+    from tokenizer import EOT_ID
+
+    ids, mask = build_sft_example(TURNS)
+    assert ids[-1] == EOT_ID, "final assistant turn must end with <|endoftext|>"
+    assert mask[-1] == 1, "the model must be trained to emit the stop token"

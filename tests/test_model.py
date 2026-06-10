@@ -1,24 +1,21 @@
 """
-tests/test_model.py — Module 1.
+tests/test_model.py — Part 1.
 
-Tiny-config forward/shape tests + LayerNorm parity + (optional) HF weight load parity.
-
-The HF-parity test is marked slow/optional: it downloads ~500MB the first time it runs
-and needs `transformers` installed. Run with `pytest -m slow tests/test_model.py`.
+Attention correctness (vs. an independent reference), causality, padding behavior,
+full-GPT shapes, tied weights, sampling, and (slow/optional) HF weight-load parity.
 """
-
-import os
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from config import GPTConfig
 from model import (
+    GPT,
     Block,
     CausalSelfAttention,
-    GPT,
-    MLP,
     ManualLayerNorm,
+    MLP,
 )
 
 TINY = GPTConfig(
@@ -33,7 +30,7 @@ TINY = GPTConfig(
 
 
 # -------------------------------------------------------------------------------------
-# Problem 1.2
+# LayerNorm (provided code, kept honest)
 # -------------------------------------------------------------------------------------
 
 
@@ -42,32 +39,25 @@ def test_manual_layernorm_matches_torch():
     C = 16
     ln_ours = ManualLayerNorm(C).double()
     ln_ref = torch.nn.LayerNorm(C, eps=1e-5).double()
-    # copy params so they match
     ln_ref.weight.data.copy_(ln_ours.weight.data)
     ln_ref.bias.data.copy_(ln_ours.bias.data)
 
     x = torch.randn(4, 8, C, dtype=torch.float64, requires_grad=True)
     y_ours = ln_ours(x)
     y_ref = ln_ref(x)
-    assert torch.allclose(
-        y_ours, y_ref, atol=1e-10
-    ), f"max diff = {(y_ours - y_ref).abs().max().item()}"
+    torch.testing.assert_close(y_ours, y_ref, atol=1e-10, rtol=0)
 
-    # backward parity on parameter grads
     g = torch.randn_like(y_ours)
     (y_ours * g).sum().backward()
     gw_ours = ln_ours.weight.grad.clone()
     gb_ours = ln_ours.bias.grad.clone()
-
-    ln_ours.weight.grad = None
-    ln_ours.bias.grad = None
     (y_ref * g).sum().backward()
-    assert torch.allclose(gw_ours, ln_ref.weight.grad, rtol=1e-6, atol=1e-10)
-    assert torch.allclose(gb_ours, ln_ref.bias.grad, rtol=1e-6, atol=1e-10)
+    torch.testing.assert_close(gw_ours, ln_ref.weight.grad, rtol=1e-6, atol=1e-10)
+    torch.testing.assert_close(gb_ours, ln_ref.bias.grad, rtol=1e-6, atol=1e-10)
 
 
 # -------------------------------------------------------------------------------------
-# Problem 1.3 / 1.4 / 1.5 — shape smoke tests (quick)
+# [FILL 1.1] attention
 # -------------------------------------------------------------------------------------
 
 
@@ -75,43 +65,73 @@ def test_attention_shapes():
     torch.manual_seed(0)
     attn = CausalSelfAttention(TINY)
     x = torch.randn(2, 10, TINY.n_embd)
-    y = attn(x)
-    assert y.shape == x.shape
+    assert attn(x).shape == x.shape
 
 
 def test_attention_is_causal():
-    """
-    Changing a future token must NOT change any earlier position's output.
-    This is the single most common GPT-2 bug, so test it explicitly.
-    """
+    """Changing a future token must not change any earlier position's output."""
     torch.manual_seed(0)
     attn = CausalSelfAttention(TINY).eval()
     x = torch.randn(1, 8, TINY.n_embd)
     y1 = attn(x).clone()
     x2 = x.clone()
-    x2[0, -1, :] += 7.0  # perturb last position
+    x2[0, -1, :] += 7.0
     y2 = attn(x2)
-    assert torch.allclose(
-        y1[0, :-1], y2[0, :-1], atol=1e-6
-    ), "changing token at position t should not affect positions < t (causal)"
+    torch.testing.assert_close(y1[0, :-1], y2[0, :-1], atol=1e-6, rtol=0)
 
 
-def test_mlp_shapes():
+def test_attention_matches_reference():
+    """
+    Independent reference: same c_attn/c_proj weights, but the attention math done
+    by F.scaled_dot_product_attention. Catches missing scaling, missing softmax,
+    and a forgotten output projection.
+    """
     torch.manual_seed(0)
-    m = MLP(TINY)
-    x = torch.randn(2, 10, TINY.n_embd)
-    assert m(x).shape == x.shape
+    attn = CausalSelfAttention(TINY).double().eval()
+    B, T, C = 2, 12, TINY.n_embd
+    nh, hs = TINY.n_head, C // TINY.n_head
+    x = torch.randn(B, T, C, dtype=torch.float64)
+
+    qkv = attn.c_attn(x)
+    q, k, v = qkv.split(C, dim=-1)
+    q, k, v = (t.view(B, T, nh, hs).transpose(1, 2) for t in (q, k, v))
+    ref = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    ref = attn.c_proj(ref.transpose(1, 2).reshape(B, T, C))
+
+    torch.testing.assert_close(attn(x), ref, atol=1e-10, rtol=1e-8)
 
 
-def test_block_shapes():
+def test_attention_padding_is_finite_and_ignored():
+    """
+    Left-padded rows must (a) produce finite outputs everywhere — a fully-masked pad
+    query softmaxes to NaN if you mask with -inf — and (b) give real positions the
+    same output as the unpadded sequence.
+    """
     torch.manual_seed(0)
-    b = Block(TINY)
+    attn = CausalSelfAttention(TINY).double().eval()
+    T_real, T_pad = 6, 3
+    x_real = torch.randn(1, T_real, TINY.n_embd, dtype=torch.float64)
+    x_padded = torch.cat(
+        [torch.randn(1, T_pad, TINY.n_embd, dtype=torch.float64), x_real], dim=1
+    )
+    mask = torch.cat([torch.zeros(1, T_pad), torch.ones(1, T_real)], dim=1)
+
+    y_padded = attn(x_padded, attention_mask=mask)
+    assert torch.isfinite(y_padded).all(), "pad rows must not go NaN/inf"
+
+    y_real = attn(x_real)
+    torch.testing.assert_close(y_padded[:, T_pad:], y_real, atol=1e-10, rtol=1e-8)
+
+
+def test_mlp_and_block_shapes():
+    torch.manual_seed(0)
     x = torch.randn(2, 10, TINY.n_embd)
-    assert b(x).shape == x.shape
+    assert MLP(TINY)(x).shape == x.shape
+    assert Block(TINY)(x).shape == x.shape
 
 
 # -------------------------------------------------------------------------------------
-# Problem 1.6 — full GPT
+# [FILL 1.2] full GPT
 # -------------------------------------------------------------------------------------
 
 
@@ -119,44 +139,87 @@ def test_gpt_forward_shapes():
     torch.manual_seed(0)
     m = GPT(TINY)
     idx = torch.randint(0, TINY.vocab_size, (2, 12))
-    logits = m(idx)
-    assert logits.shape == (2, 12, TINY.vocab_size)
-
-
-def test_gpt_hidden_shapes():
-    torch.manual_seed(0)
-    m = GPT(TINY)
-    idx = torch.randint(0, TINY.vocab_size, (2, 12))
-    h = m.forward_hidden(idx)
-    assert h.shape == (2, 12, TINY.n_embd)
+    assert m(idx).shape == (2, 12, TINY.vocab_size)
+    assert m.forward_hidden(idx).shape == (2, 12, TINY.n_embd)
 
 
 def test_gpt_tied_embeddings():
-    """LM head must reuse wte — total params should NOT include a second vocab×embd."""
+    """LM head must reuse wte — no separate lm_head Linear."""
     m = GPT(TINY)
-    n_params = sum(p.numel() for p in m.parameters())
-    # Upper bound if UNtied: 2 * V * C + ...; tied: V*C + ...
-    # Just assert param id: no `lm_head` linear registered
-    assert not hasattr(
-        m, "lm_head"
-    ), "tie wte with logits; don't register a separate lm_head"
+    assert not hasattr(m, "lm_head"), "tie the LM head to wte, don't register a Linear"
+
+
+def test_gpt_left_padding_consistent():
+    """
+    The course's padding contract, end to end: a left-padded row must produce the
+    SAME last-token logits as the unpadded row. Requires both the key-padding mask
+    and mask-derived position ids to be wired through.
+    """
+    torch.manual_seed(0)
+    m = GPT(TINY).double().eval()
+    ids = torch.randint(0, TINY.vocab_size, (1, 7))
+    pad = torch.zeros(1, 4, dtype=torch.long)
+    ids_padded = torch.cat([pad, ids], dim=1)
+    mask = torch.cat([torch.zeros(1, 4), torch.ones(1, 7)], dim=1)
+
+    logits_plain = m(ids)[:, -1, :]
+    logits_padded = m(ids_padded, attention_mask=mask)[:, -1, :]
+    torch.testing.assert_close(logits_padded, logits_plain, atol=1e-8, rtol=1e-8)
 
 
 # -------------------------------------------------------------------------------------
-# Problem 1.7 — HF parity (slow, optional)
+# Sampling (provided)
+# -------------------------------------------------------------------------------------
+
+
+def test_generate_produces_correct_length():
+    torch.manual_seed(0)
+    m = GPT(TINY).eval()
+    idx = torch.randint(0, TINY.vocab_size, (2, 5))
+    out = m.generate(idx, max_new_tokens=7, temperature=1.0)
+    assert out.shape == (2, 12)
+
+
+def test_generate_eos_padding():
+    torch.manual_seed(0)
+    m = GPT(TINY).eval()
+    idx = torch.randint(0, TINY.vocab_size, (2, 5))
+    eos = 3
+    out = m.generate(idx, max_new_tokens=20, eos_token_id=eos)
+    assert out.shape == (2, 25)
+    for b in range(2):
+        gen = out[b, 5:].tolist()
+        if eos in gen:
+            after = gen[gen.index(eos):]
+            assert all(t == eos for t in after), "tokens after EOS must be EOS padding"
+
+
+# -------------------------------------------------------------------------------------
+# Config sizes
+# -------------------------------------------------------------------------------------
+
+
+def test_config_from_name():
+    cfg = GPTConfig.from_name("gpt2-medium")
+    assert (cfg.n_layer, cfg.n_head, cfg.n_embd) == (24, 16, 1024)
+    assert cfg.vocab_size == 50257
+    with pytest.raises(ValueError):
+        GPTConfig.from_name("gpt3")
+
+
+# -------------------------------------------------------------------------------------
+# HF weight-load parity (slow, needs network + transformers)
 # -------------------------------------------------------------------------------------
 
 
 @pytest.mark.slow
 def test_hf_parity():
-    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("transformers")
     from transformers import GPT2LMHeadModel, GPT2TokenizerFast
-
-    cfg = GPTConfig()  # gpt2-small defaults
-    model = GPT(cfg).eval()
 
     from model import load_gpt2_from_hf
 
+    model = GPT(GPTConfig()).eval()
     load_gpt2_from_hf(model, "gpt2")
 
     hf = GPT2LMHeadModel.from_pretrained("gpt2").eval()
@@ -168,16 +231,3 @@ def test_hf_parity():
         theirs = hf(ids).logits
     max_diff = (ours - theirs).abs().max().item()
     assert max_diff < 1e-4, f"hf parity failed, max abs diff = {max_diff}"
-
-
-# -------------------------------------------------------------------------------------
-# Problem 1.8 — sampling
-# -------------------------------------------------------------------------------------
-
-
-def test_generate_produces_correct_length():
-    torch.manual_seed(0)
-    m = GPT(TINY).eval()
-    idx = torch.randint(0, TINY.vocab_size, (2, 5))
-    out = m.generate(idx, max_new_tokens=7, temperature=1.0)
-    assert out.shape == (2, 12)

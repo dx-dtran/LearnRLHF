@@ -5,3 +5,5 @@ numpy
 matplotlib
 tqdm
 pytest
+# optional, used only by model.load_gpt2_from_hf to download GPT-2 weights:
+# transformers

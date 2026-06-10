@@ -25,6 +25,13 @@ Math you should be able to reproduce on paper (see notes/03-rm.md):
     only differences are learned.
 """
 
+import os as _os
+import sys as _sys
+
+# make `python solutions/train_*.py` runnable: repo root provides data_hh/config,
+# while this directory's own model/tokenizer/ppo_core shadow the scaffolds
+_sys.path.insert(1, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import time
 
 import torch
@@ -62,8 +69,9 @@ class RewardModel(nn.Module):
         Pooling at the LAST REAL token matters: with right padding, column T-1 is
         usually padding garbage. Use gather, not [:, -1].
         """
-        # ================================ YOUR CODE (~3 lines) ======================
-        raise NotImplementedError("[FILL 3.1] RewardModel.forward")
+        hidden = self.backbone.forward_hidden(input_ids, attention_mask)
+        scores = self.reward_head(hidden)
+        return scores.gather(1, last_idx.unsqueeze(1)).squeeze(1)
 
 
 # =====================================================================================
@@ -81,8 +89,7 @@ def bt_loss(r_chosen: torch.Tensor, r_rejected: torch.Tensor) -> torch.Tensor:
     softplus, not -log(sigmoid(.)): same function, but it doesn't overflow when the
     score gap is large.
     """
-    # ================================ YOUR CODE (1 line) ============================
-    raise NotImplementedError("[FILL 3.2] bt_loss")
+    return F.softplus(r_rejected - r_chosen).mean()
 
 
 def pairwise_accuracy(r_chosen: torch.Tensor, r_rejected: torch.Tensor) -> torch.Tensor:

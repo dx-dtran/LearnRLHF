@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Theory packet for Problems 4.2 and 4.3 (per-token KL and reward shaping).
+Theory packet for [FILL 4.2] and [FILL 4.3] (per-token KL and reward shaping).
 The KL term is short to write down, but it is the largest single source of
 PPO instability on text, and the math behind it gets brushed past in many
 references.
 
-In Module 3 a reward model was trained that scores any (prompt, response)
+In Part 3 a reward model was trained that scores any (prompt, response)
 pair. Naively, PPO can update the policy ("policy" = the network being
 trained, started from the SFT weights) so it produces responses with the
 highest possible reward-model score. The problem is that the reward model
@@ -56,11 +56,9 @@ Five facts:
 1. **It is always non-negative.** $\mathrm{KL}(P \| Q) \ge 0$, with
    equality iff $P = Q$ everywhere. (Follows from Jensen's inequality
    applied to the concave function $\log$.)
-2. **It is not symmetric.** $\mathrm{KL}(P \| Q) \ne \mathrm{KL}(Q \|
-   P)$ in general. Despite the name "divergence", it is not a proper
+2. **It is not symmetric.** $\mathrm{KL}(P \| Q) \ne \mathrm{KL}(Q \| P)$ in general. Despite the name "divergence", it is not a proper
    distance.
-3. **Units are nats**, since the natural log is used. Multiply by $1/\ln
-   2 \approx 1.44$ to convert to bits.
+3. **Units are nats**, since the natural log is used. Multiply by $1/\ln 2 \approx 1.44$ to convert to bits.
 4. **It is an expectation under $P$.** $\sum_x P(x) \log(P(x)/Q(x))$ can
    be read as $\mathbb{E}_{x \sim P}[\log(P(x)/Q(x))]$, the average
    log-ratio over samples drawn from $P$. PPO only has samples from one
@@ -241,8 +239,7 @@ Or in code-style:
 
 The samples come from $\pi_\theta$. Under that sampling distribution,
 $\mathbb{E}_{a \sim \pi_\theta}[\bar{\rho}_t - 1] = 0$, which is what
-keeps the diagnostic unbiased for the forward KL. Substituting $\rho_t -
-1$ instead is still nonnegative but no longer estimates the same KL
+keeps the diagnostic unbiased for the forward KL. Substituting $\rho_t - 1$ instead is still nonnegative but no longer estimates the same KL
 under current-policy samples.
 
 Three standard estimators, $k_1$, $k_2$, $k_3$:
@@ -304,8 +301,7 @@ Or in code-style:
   Set $x = -L_t$. Equality holds only when $L_t = 0$.
 - **Unbiased for forward KL under current-policy samples**, because
   $\mathbb{E}_{a \sim \pi_\theta}[\bar{\rho}_t - 1] = 0$, so
-  $\mathbb{E}_{a \sim \pi_\theta}[k_3] = \mathbb{E}_{a \sim
-  \pi_\theta}[L_t]$.
+  $\mathbb{E}_{a \sim \pi_\theta}[k_3] = \mathbb{E}_{a \sim \pi_\theta}[L_t]$.
 - **Lower variance than $k_1$** in practice: the inverse-ratio
   correction pulls extreme log-ratio samples back toward a more stable
   nonnegative diagnostic.
@@ -458,7 +454,7 @@ is the terminal RM reward.
 
 ---
 
-## 4. Reward shaping (Problem 4.3)
+## 4. Reward shaping ([FILL 4.3])
 
 After a rollout the available tensors are:
 

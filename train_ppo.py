@@ -1,147 +1,317 @@
 """
-train_ppo.py — PPO training loop.
+train_ppo.py — the PPO loop. Fully provided; you build its internals in ppo_core.py.
 
-Module 5. Glues the ppo_core.py building blocks into an actual RLHF run.
+Run with:
 
-Four models live here (see CLAUDE.md §3):
+    python train_ppo.py       (expects sft.pt and rm.pt)
 
-    policy       : trainable, init from sft.pt
-    value        : ScalarHead on TOP of the policy's final hidden states. We share the
-                   backbone with the policy (cheaper); the only extra trainable params
-                   are the n_embd -> 1 head. If you see value-head instability, swap to
-                   a SEPARATE backbone for value (more memory, more stable).
-    reference    : FROZEN copy of sft.pt. Used to compute the KL penalty.
-    reward_model : FROZEN, loaded from rm.pt. Used to score full (prompt+response).
+Four models in memory (24GB budget, see notes/05-ppo.md):
 
-Each PPO iteration:
-    1. ROLLOUT (no-grad everything): sample prompts, generate responses from policy,
-       record (logprobs_old, values_old), compute ref logprobs, compute RM reward,
-       shape per-token rewards, compute GAE.
-    2. OPTIMIZE: K epochs × minibatches over that rollout. Recompute logprobs and
-       values with GRAD enabled; combine PPO policy loss + value loss + entropy bonus;
-       backward, clip, step.
-    3. LOG: reward, KL (k3), policy loss, value loss, entropy, clip frac, tokens/sec.
+    policy       trainable, init from sft.pt
+    value head   trainable, ScalarHead on the POLICY's hidden states (shared
+                 backbone: cheaper; a separate value backbone is more stable if you
+                 see value-loss blowups)
+    reference    frozen copy of sft.pt — the KL anchor
+    reward model frozen, from rm.pt
 
-Memory: all 4 models live in bf16. Ref and RM are frozen, so they do not keep
-activations at full precision; call them under `torch.no_grad()` and autocast.
-Policy and value accumulate activations. If memory is tight, use gradient
-checkpointing on the policy's blocks by wrapping each block's forward in
-`torch.utils.checkpoint.checkpoint`.
+Per iteration: rollout (no grad) -> K epochs of minibatch PPO (grad) -> log.
+
+What healthy training looks like:
+    mean RM reward up, KL (k3) drifting up SLOWLY, entropy down slowly, clip
+    fraction in the 0.05-0.3 range. Reward spiking while KL explodes is reward
+    hacking: raise kl_coef or lower policy_lr.
 """
 
-# =====================================================================================
-# Problem 5.1 — Model layout, memory map, smoke test
-# =====================================================================================
-# Script-level sketch:
-#
-#   def build_models(cfg):
-#       policy  = GPT(cfg).cuda().to(bf16)
-#       value_h = ScalarHead(cfg.n_embd).cuda().to(bf16)
-#       ref     = GPT(cfg).cuda().to(bf16)          ; ref.requires_grad_(False); ref.eval()
-#       rm      = RewardModel(cfg).cuda().to(bf16)  ; rm.requires_grad_(False); rm.eval()
-#       load weights: policy <- sft.pt, ref <- sft.pt, rm <- rm.pt
-#       return policy, value_h, ref, rm
-#
-#   after one dummy forward, print torch.cuda.max_memory_allocated() / 1e9 GB.
-#
-#   TODO(5.1): implement build_models + a main that prints memory.
+import csv
+import os
+import time
+from collections import defaultdict
+
+import torch
+
+from config import GPTConfig, PPOConfig
+from model import GPT, ScalarHead
+from ppo_core import (
+    gae,
+    gather_logprobs,
+    generate_with_logprobs,
+    kl_k1,
+    kl_k3,
+    masked_entropy,
+    normalize_advantages,
+    ppo_policy_loss,
+    shape_reward,
+    value_loss,
+)
+from train_rm import RewardModel
+from train_sft import autocast_ctx
 
 
 # =====================================================================================
-# Problem 5.2 — Rollout phase
+# Model layout
 # =====================================================================================
-# def rollout(policy, value_h, ref, rm, prompt_batch, cfg):
-#     with torch.no_grad(), autocast(bf16):
-#         full_ids, response_ids, logprobs_old, values_old, response_mask = \
-#             generate_with_logprobs(policy, value_h, prompt_batch["prompt_ids"],
-#                                    prompt_batch["prompt_mask"],
-#                                    cfg.response_max_len, cfg.temperature, ...)
-#         ref_logits  = ref(full_ids, ...)                    # (B, T, V)
-#         ref_logprobs = gather_logprobs(ref_logits[:, T_p-1:-1, :], response_ids)
-#         rm_reward    = rm(full_ids, full_mask, last_idx)    # (B,)
-#         kl_t         = kl_k1(logprobs_old, ref_logprobs)
-#         per_tok_r    = shape_reward(rm_reward, kl_t, response_mask, cfg.kl_coef)
-#         adv, ret     = gae(per_tok_r, values_old, response_mask, cfg.gamma, cfg.gae_lambda)
-#         adv          = normalize_advantages(adv, response_mask)
-#     return dict(full_ids=, response_ids=, logprobs_old=, values_old=, advantages=adv,
-#                 returns=ret, response_mask=, rm_reward=, kl_t=)
-#
-# TODO(5.2): implement.
+
+
+def build_models(model_cfg: GPTConfig, cfg: PPOConfig, device: torch.device):
+    def load_backbone(path: str) -> dict:
+        return torch.load(path, map_location="cpu", weights_only=False)["model"]
+
+    policy = GPT(model_cfg)
+    policy.load_state_dict(load_backbone(cfg.policy_init))
+    policy.to(device).train()
+
+    value_head = ScalarHead(model_cfg.n_embd).to(device).train()
+
+    ref = GPT(model_cfg)
+    ref.load_state_dict(load_backbone(cfg.ref_init))
+    ref.to(device).eval().requires_grad_(False)
+
+    rm = RewardModel(model_cfg)
+    rm.load_state_dict(load_backbone(cfg.rm_init))
+    rm.to(device).eval().requires_grad_(False)
+
+    n = sum(p.numel() for p in policy.parameters())
+    print(f"policy params: {n/1e6:.0f}M; 4 models on {device}")
+    return policy, value_head, ref, rm
 
 
 # =====================================================================================
-# Problem 5.3 — Optimize phase (inner loop)
+# Phase 1: rollout (everything no-grad)
 # =====================================================================================
-# def optimize(policy, value_h, optimizer, rollout, cfg):
-#     stats = defaultdict(list)
-#     B = rollout["full_ids"].size(0)
-#     for epoch in range(cfg.ppo_epochs):
-#         for mb_idx in minibatches(B, cfg.minibatch_size):
-#             # slice all rollout tensors by mb_idx
-#             with autocast(bf16):
-#                 hidden = policy.forward_hidden(full_ids_mb, mask_mb)
-#                 logits = hidden @ policy.wte.weight.T
-#                 values_new = value_h(hidden).squeeze(-1)
-#                 # slice to response region
-#                 logprobs_new = gather_logprobs(logits[:, T_p-1:-1, :], response_ids_mb)
-#                 values_new   = values_new[:, T_p-1:-1]
-#                 Lpi = ppo_policy_loss(logprobs_new, logprobs_old_mb, adv_mb, mask_mb, cfg.clip_eps)
-#                 Lv  = value_loss(values_new, values_old_mb, returns_mb, mask_mb, cfg.value_clip_eps)
-#                 H   = masked_entropy(logits[:, T_p-1:-1, :], mask_mb)
-#                 loss = Lpi + cfg.value_coef * Lv - cfg.entropy_coef * H
-#             loss.backward()
-#             clip_grad_norm_(params, cfg.grad_clip)
-#             optimizer.step(); optimizer.zero_grad()
-#             stats[...].append(...)
-#     return {k: mean(v) for k,v in stats.items()}
-#
-# TODO(5.3): implement. The response starts at T_p - 1 in logits because logits[i]
-# predicts token i+1, so logits[T_p - 1] predicts the first response token.
+
+
+@torch.no_grad()
+def rollout(policy, value_head, ref, rm, prompt_ids, prompt_mask, cfg: PPOConfig, eos_token_id):
+    device = prompt_ids.device
+    T_p = prompt_ids.size(1)
+    policy.eval()
+    with autocast_ctx(device):
+        full_ids, response_ids, logprobs_old, values_old, response_mask = (
+            generate_with_logprobs(
+                policy,
+                value_head,
+                prompt_ids,
+                prompt_mask,
+                cfg.response_max_len,
+                temperature=cfg.temperature,
+                top_k=cfg.top_k,
+                top_p=cfg.top_p,
+                eos_token_id=eos_token_id,
+            )
+        )
+        full_mask = torch.cat([prompt_mask.float(), response_mask], dim=1)
+
+        ref_logits = ref(full_ids, attention_mask=full_mask)
+        ref_logprobs = gather_logprobs(ref_logits[:, T_p - 1:-1, :], response_ids)
+
+        last_idx = T_p + response_mask.sum(dim=1).long() - 1
+        rm_reward = rm(full_ids, full_mask, last_idx)
+    policy.train()
+
+    # fp32 for the RL arithmetic
+    logprobs_old, ref_logprobs, values_old, response_mask, rm_reward = (
+        x.float() for x in (logprobs_old, ref_logprobs, values_old, response_mask, rm_reward)
+    )
+
+    kl = kl_k1(logprobs_old, ref_logprobs)
+    rewards = shape_reward(rm_reward, kl, response_mask, cfg.kl_coef)
+    advantages, returns = gae(rewards, values_old, response_mask, cfg.gamma, cfg.gae_lambda)
+    advantages = normalize_advantages(advantages, response_mask)
+
+    n_tok = response_mask.sum().clamp_min(1.0)
+    return {
+        "full_ids": full_ids,
+        "full_mask": full_mask,
+        "response_ids": response_ids,
+        "response_mask": response_mask,
+        "logprobs_old": logprobs_old,
+        "values_old": values_old,
+        "advantages": advantages,
+        "returns": returns,
+        "T_p": T_p,
+        "stats": {
+            "rm_reward": rm_reward.mean().item(),
+            "kl_k3": (kl_k3(logprobs_old, ref_logprobs) * response_mask).sum().item()
+            / n_tok.item(),
+            "response_len": (response_mask.sum(dim=1)).float().mean().item(),
+        },
+    }
 
 
 # =====================================================================================
-# Problem 5.4 — Logging
+# Phase 2: optimize (K epochs of minibatch PPO)
 # =====================================================================================
-# TODO(5.4):
-#   - write stats to a CSV at training time
-#   - every N iters, render matplotlib plots of reward, kl, policy_loss, value_loss
-#   - print tokens/sec = (B * response_len) / iter_time
+
+
+def optimize(policy, value_head, optimizer, ro: dict, cfg: PPOConfig):
+    device = ro["full_ids"].device
+    B = ro["full_ids"].size(0)
+    T_p = ro["T_p"]
+    stats = defaultdict(list)
+
+    for _ in range(cfg.ppo_epochs):
+        perm = torch.randperm(B, device=device)
+        for start in range(0, B, cfg.minibatch_size):
+            idx = perm[start : start + cfg.minibatch_size]
+            mb = {k: v[idx] for k, v in ro.items() if torch.is_tensor(v)}
+
+            with autocast_ctx(device):
+                hidden = policy.forward_hidden(mb["full_ids"], mb["full_mask"])
+                hidden_resp = hidden[:, T_p - 1:-1, :]
+                logits_resp = hidden_resp @ policy.wte.weight.t()
+                logprobs_new = gather_logprobs(logits_resp, mb["response_ids"])
+                values_new = value_head(hidden_resp)
+
+                mask = mb["response_mask"]
+                l_pi = ppo_policy_loss(
+                    logprobs_new.float(), mb["logprobs_old"], mb["advantages"],
+                    mask, cfg.clip_eps,
+                )
+                l_v = value_loss(
+                    values_new.float(), mb["values_old"], mb["returns"],
+                    mask, cfg.value_clip_eps,
+                )
+                h = masked_entropy(logits_resp.float(), mask)
+                loss = l_pi + cfg.value_coef * l_v - cfg.entropy_coef * h
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            params = [p for g in optimizer.param_groups for p in g["params"]]
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
+            optimizer.step()
+
+            with torch.no_grad():
+                ratio = torch.exp(logprobs_new.float() - mb["logprobs_old"])
+                clipped = ((ratio - 1.0).abs() > cfg.clip_eps).float()
+                clip_frac = (clipped * mask).sum() / mask.sum().clamp_min(1.0)
+
+            stats["policy_loss"].append(l_pi.item())
+            stats["value_loss"].append(l_v.item())
+            stats["entropy"].append(h.item())
+            stats["clip_frac"].append(clip_frac.item())
+            stats["grad_norm"].append(float(grad_norm))
+
+    return {k: sum(v) / len(v) for k, v in stats.items()}
 
 
 # =====================================================================================
-# Problem 5.5 — Larger sizes
+# Logging
 # =====================================================================================
-# After implementing GPTConfig.from_name in config.py:
-#
-#   def test_model_sizes_smoke():
-#       for name in ["gpt2-small", "gpt2-medium", "gpt2-large", "gpt2-xl"]:
-#           cfg = GPTConfig.from_name(name)
-#           m = GPT(cfg).cuda().to(bf16)
-#           x = torch.randint(0, cfg.vocab_size, (1, 64), device="cuda")
-#           logits = m(x); logits.sum().backward()
-#           print(name, torch.cuda.max_memory_allocated() / 1e9)
-#           del m; torch.cuda.empty_cache()
-#
-# TODO(5.5): implement as a `if __name__ == "__main__" and "--smoke" in sys.argv` branch
-# or a separate tiny script. Log peak memory to notes/05-ppo.md.
+
+
+CSV_FIELDS = [
+    "iter", "rm_reward", "kl_k3", "response_len", "policy_loss", "value_loss",
+    "entropy", "clip_frac", "grad_norm", "tokens_per_sec",
+]
+
+
+def log_csv(path: str, row: dict):
+    new = not os.path.exists(path)
+    with open(path, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        if new:
+            w.writeheader()
+        w.writerow({k: row.get(k, "") for k in CSV_FIELDS})
+
+
+def plot_csv(path: str, out_png: str = "ppo_plots.png"):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rows = list(csv.DictReader(open(path)))
+    if len(rows) < 2:
+        return
+    keys = ["rm_reward", "kl_k3", "policy_loss", "value_loss", "entropy", "clip_frac"]
+    fig, axes = plt.subplots(2, 3, figsize=(15, 7))
+    xs = [int(r["iter"]) for r in rows]
+    for ax, k in zip(axes.flat, keys):
+        ax.plot(xs, [float(r[k]) for r in rows])
+        ax.set_title(k)
+        ax.set_xlabel("iter")
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=100)
+    plt.close(fig)
+
+
+# =====================================================================================
+# Main
+# =====================================================================================
 
 
 def train_ppo():
-    """
-    TODO(5.1-5.4): wire everything together:
+    from torch.utils.data import DataLoader
 
-        cfg = PPOConfig()
-        policy, value_h, ref, rm = build_models(GPTConfig(), cfg)
-        tokenizer = ...
-        train_prompts = PromptDataset(...)
-        optim = build_optimizer(...)  # include value_h params
-        for it in range(cfg.num_iters):
-            batch = next(prompt_iterator)
-            ro = rollout(policy, value_h, ref, rm, batch, cfg)
-            stats = optimize(policy, value_h, optim, ro, cfg)
-            log(stats, it); maybe_save(it)
-    """
-    raise NotImplementedError("TODO(5.1-5.4): train_ppo")
+    from data_hh import PromptDataset, download_hh, prompt_collate
+    from tokenizer import EOT_ID
+
+    cfg = PPOConfig()
+    model_cfg = GPTConfig()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    policy, value_head, ref, rm = build_models(model_cfg, cfg, device)
+
+    prompts = PromptDataset(download_hh("train"), prompt_max_len=cfg.prompt_max_len)
+    loader = DataLoader(
+        prompts, batch_size=cfg.rollout_batch_size, shuffle=True,
+        collate_fn=prompt_collate, drop_last=True,
+    )
+    print(f"{len(prompts)} prompts")
+
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": policy.parameters(), "lr": cfg.policy_lr},
+            {"params": value_head.parameters(), "lr": cfg.value_lr},
+        ],
+        betas=cfg.betas,
+        weight_decay=cfg.weight_decay,
+    )
+
+    it = 0
+    batches = iter(loader)
+    while it < cfg.num_iters:
+        try:
+            batch = next(batches)
+        except StopIteration:
+            batches = iter(loader)
+            batch = next(batches)
+
+        t0 = time.time()
+        prompt_ids = batch["prompt_ids"].to(device)
+        prompt_mask = batch["prompt_mask"].to(device)
+
+        ro = rollout(policy, value_head, ref, rm, prompt_ids, prompt_mask, cfg, EOT_ID)
+        rollout_stats = ro.pop("stats")
+        opt_stats = optimize(policy, value_head, optimizer, ro, cfg)
+
+        dt = time.time() - t0
+        n_tokens = ro["response_mask"].sum().item()
+        row = {
+            "iter": it,
+            **rollout_stats,
+            **opt_stats,
+            "tokens_per_sec": n_tokens / dt,
+        }
+        log_csv(cfg.log_csv, row)
+        if it % cfg.log_every == 0:
+            print(
+                f"iter {it} reward {row['rm_reward']:.3f} kl {row['kl_k3']:.3f} "
+                f"pi {row['policy_loss']:.4f} v {row['value_loss']:.4f} "
+                f"H {row['entropy']:.2f} clip {row['clip_frac']:.2f} "
+                f"({row['tokens_per_sec']:.0f} tok/s)"
+            )
+        if cfg.plot_every and it and it % cfg.plot_every == 0:
+            plot_csv(cfg.log_csv)
+        if it and it % cfg.save_every == 0 or it == cfg.num_iters - 1:
+            torch.save(
+                {"model": policy.state_dict(), "value_head": value_head.state_dict(),
+                 "config": model_cfg},
+                cfg.save_path,
+            )
+        it += 1
+
+    print(f"done; saved {cfg.save_path}")
 
 
 if __name__ == "__main__":

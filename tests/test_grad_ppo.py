@@ -11,6 +11,7 @@ from grad_check import check_grad, rel_error
 from ppo_core import (
     gae,
     gather_logprobs,
+    generate_with_logprobs,
     kl_k1,
     kl_k3,
     masked_entropy,
@@ -213,3 +214,64 @@ def test_adv_norm_ignores_pad():
     # both should agree on the real (masked=1) positions
     diff = (out_clean - out_polluted)[mask.bool()].abs().max().item()
     assert diff < 1e-10, f"pad garbage leaked into stats, diff={diff}"
+
+# -------------------------------------------------------------------------------------
+# Rollout alignment (provided code, but THE place where off-by-ones hide)
+# -------------------------------------------------------------------------------------
+
+def _tiny_policy():
+    from config import GPTConfig
+    from model import GPT, ScalarHead
+
+    cfg = GPTConfig(block_size=32, vocab_size=32, n_layer=2, n_head=2, n_embd=16)
+    return GPT(cfg).eval(), ScalarHead(cfg.n_embd).eval()
+
+
+def test_rollout_alignment():
+    """
+    logprobs_old recorded during the rollout must equal an independent recomputation:
+    forward over [prompt + response], slice logits[:, T_p-1:-1], gather response ids.
+    """
+    torch.manual_seed(0)
+    policy, value_head = _tiny_policy()
+    B, T_p, T_r = 3, 5, 6
+    prompt_ids = torch.randint(0, 32, (B, T_p))
+    prompt_mask = torch.ones(B, T_p)
+    prompt_mask[0, :2] = 0  # one left-padded row
+
+    full_ids, response_ids, logprobs_old, values_old, response_mask = (
+        generate_with_logprobs(policy, value_head, prompt_ids, prompt_mask, T_r)
+    )
+    assert full_ids.shape == (B, T_p + T_r)
+    assert response_ids.shape == logprobs_old.shape == values_old.shape == (B, T_r)
+    assert torch.all(response_mask == 1.0), "no EOS id given: all tokens are real"
+
+    full_mask = torch.cat([prompt_mask, response_mask], dim=1)
+    with torch.no_grad():
+        logits = policy(full_ids, attention_mask=full_mask)
+    recomputed = gather_logprobs(logits[:, T_p - 1:-1, :], response_ids)
+    torch.testing.assert_close(logprobs_old, recomputed, atol=1e-5, rtol=1e-5)
+
+
+def test_rollout_eos_masking():
+    """After a row's first EOS, ids must be EOS padding and the mask must be zero."""
+    torch.manual_seed(1)
+    policy, value_head = _tiny_policy()
+    B, T_p, T_r = 4, 4, 12
+    prompt_ids = torch.randint(0, 32, (B, T_p))
+    prompt_mask = torch.ones(B, T_p)
+    eos = 7
+
+    _, response_ids, _, _, response_mask = generate_with_logprobs(
+        policy, value_head, prompt_ids, prompt_mask, T_r, eos_token_id=eos
+    )
+    for b in range(B):
+        ids = response_ids[b].tolist()
+        mask = response_mask[b].tolist()
+        if eos in ids:
+            t = ids.index(eos)
+            assert mask[t] == 1.0, "the EOS token itself is a real action"
+            assert all(m == 0.0 for m in mask[t + 1:]), "everything after EOS is pad"
+            assert all(i == eos for i in ids[t + 1:]), "pad token is EOS"
+        else:
+            assert all(m == 1.0 for m in mask)

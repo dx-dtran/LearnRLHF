@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The course has three training phases (introduced in detail in Modules 2, 3, and 5):
+The course has three training phases (introduced in detail in Parts 2, 3, and 5):
 
 - **SFT** (supervised fine-tuning): teach a pretrained GPT-2 to imitate well-formed
   assistant replies on a chat template.
@@ -23,7 +23,7 @@ A row in HH-RLHF contains two possible assistant endings to the same conversatio
 one preferred by a human. The same source row produces three views: a single
 dialogue for SFT, a pair of sequences (chosen / rejected) for the reward model, and
 a prompt-only example for PPO. ("Rollout" is the PPO term for the procedure of
-sampling a response from the current model on a fresh prompt; see Module 4.)
+sampling a response from the current model on a fresh prompt; see Part 4.)
 
 ---
 
@@ -67,7 +67,8 @@ forcing it through silently.
 The dataset is split into two subsets, `helpful-base` and `harmless-base`. For
 this course use the whole `Anthropic/hh-rlhf` mix without separating them.
 
-When you run Problem 0.2, fill in the following statistics:
+The provided `data_hh.py` helpers reproduce the following statistics; fill them
+in if you run the inspection yourself (an optional exercise):
 
 - Number of rows in train and test.
 - How many turns the typical conversation has (most are 1–4 human turns).
@@ -213,7 +214,7 @@ Two properties of this mask:
 - The assistant's closing `<|im_end|>` at position 9 is `mask = 1`. The model
   must learn when to stop, which means it must learn to emit that closing token.
 
-Module 2 (`02-sft.md`) revisits the same example after the shift to the
+Part 2 (`02-sft.md`) revisits the same example after the shift to the
 predict-next frame, where the mask attaches to the *target* token rather than
 the *input* token.
 
@@ -330,7 +331,8 @@ incomplete responses and corrupting stop behavior.
 
 ## 5. What to commit to `notes/00-data.md`
 
-Fill this file in while doing Problem 0.2:
+The data inspection code is provided in `data_hh.py`; if you rerun it yourself
+(optional), fill this file in with:
 
 - Number of train and test rows.
 - A quick histogram of turn counts ("most examples have 1–2 human turns").

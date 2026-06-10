@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Theory packet for Problems 4.5, 4.6, and 4.7. Companion to
+Theory packet for [FILL 4.5], [FILL 4.6], and [FILL 4.7]. Companion to
 `04-ppo-gae.md` (which produces per-token advantages from a rollout) and
 `04-ppo-kl.md` (which produces the per-token reward).
 
@@ -194,13 +194,11 @@ is $[0.8,\, 1.2]$. Pick two tokens:
 - **Token A (good action).** Advantage $A = +1$ (this action turned
   out better than expected). Current ratio $\rho = 1.5$: the policy
   has moved so that this token is 1.5× more likely than at rollout.
-  Compute: $\mathrm{surr}_1 = 1.5$, $\mathrm{surr}_2 = 1.2$. $\min =
-  1.2$. Loss $= -1.2$. The gradient is **zero** because the flat
+  Compute: $\mathrm{surr}_1 = 1.5$, $\mathrm{surr}_2 = 1.2$. $\min = 1.2$. Loss $= -1.2$. The gradient is **zero** because the flat
   clipped branch won the $\min$. No further pushing this token
   upward; it has already moved too far.
 - **Token B (bad action).** Advantage $A = -1$. Ratio $\rho = 1.5$.
-  Compute: $\mathrm{surr}_1 = -1.5$, $\mathrm{surr}_2 = -1.2$. $\min =
-  -1.5$. Loss $= +1.5$. The gradient is **non-zero** and pushes
+  Compute: $\mathrm{surr}_1 = -1.5$, $\mathrm{surr}_2 = -1.2$. $\min = -1.5$. Loss $= +1.5$. The gradient is **non-zero** and pushes
   $\rho$ down, which is the correct direction since this action
   turned out badly. The clip does NOT fire, since firing it would
   soften the response to a bad action that should be suppressed.
@@ -290,8 +288,7 @@ policy gradient should behave like the vanilla advantage-weighted
 log-prob gradient. If it does not, the ratio or the loss sign is
 wrong.
 
-For the clipped case, $\mathrm{surr}_2 = (\text{constant w.r.t. }
-\theta) \cdot A$. The clip saturates, so changing $\log \pi_\theta$
+For the clipped case, $\mathrm{surr}_2 = (\text{constant w.r.t. } \theta) \cdot A$. The clip saturates, so changing $\log \pi_\theta$
 does not change $\mathrm{surr}_2$. Therefore:
 
 $$
@@ -308,7 +305,7 @@ moved far enough in the advantage-improving direction for the current
 inner-loop update. Future rollouts may sample different tokens,
 compute different advantages, and produce fresh gradients.
 
-Verify with the **edge test** in Problem 4.5. Set every ratio to a
+Verify with the **edge test** for [FILL 4.5]. Set every ratio to a
 large value (say `rho = 5`) and `A > 0`. Every token should land in
 the "A > 0, rho > 1 + eps, clip active" regime. Autograd must report
 exactly zero gradient on those tokens. Any nonzero gradient indicates
@@ -336,7 +333,7 @@ usually lives in the middle.
 
 ---
 
-## 3. Value loss (Problem 4.6)
+## 3. Value loss ([FILL 4.6])
 
 ### 3.1 Unclipped form
 
@@ -441,7 +438,7 @@ Piecewise linear in `V_theta`:
   - The unclipped branch `(V_theta - R)^2` has the usual gradient.
   - Whichever branch is picked by `max` determines the gradient.
 
-Gradient-check the whole thing at fp64 in Problem 4.6. Include a
+Gradient-check the whole thing at fp64 in the test for [FILL 4.6]. Include a
 case where `V_theta` is far from both `V_old` and `R` to verify the
 gradient matches the selected branch.
 
@@ -494,7 +491,7 @@ value learning; the benefit is that the policy stops diverging.
 
 ---
 
-## 4. Entropy bonus (Problem 4.7)
+## 4. Entropy bonus ([FILL 4.7])
 
 ### 4.1 Purpose
 
@@ -553,8 +550,7 @@ $$
 H = -\sum_v p_v \log p_v
 $$
 
-Differentiating $p_v \log p_v$ with respect to $z_u$ gives $(\partial
-p_v / \partial z_u) \cdot (\log p_v + 1)$ (product rule, using
+Differentiating $p_v \log p_v$ with respect to $z_u$ gives $(\partial p_v / \partial z_u) \cdot (\log p_v + 1)$ (product rule, using
 $\partial \log p_v / \partial p_v = 1/p_v$). So:
 
 $$
@@ -562,8 +558,7 @@ $$
  = -\sum_v \frac{\partial p_v}{\partial z_u} \cdot \bigl(\log p_v + 1\bigr)
 $$
 
-Plug in the softmax derivative $\partial p_v / \partial z_u =
-p_v(\delta_{v,u} - p_u)$ from `02-sft.md`:
+Plug in the softmax derivative $\partial p_v / \partial z_u = p_v(\delta_{v,u} - p_u)$ from `02-sft.md`:
 
 $$
 \frac{\partial H}{\partial z_u}
@@ -686,7 +681,8 @@ Typical coefficients (the default config):
 - `epsilon_v = 0.2` for the value clip.
 
 Backward through the sum, clip the gradient norm at 1.0, step the
-optimizer. Four epochs over the rollout batch (Problem 5.3) before
+optimizer. Four epochs over the rollout batch (the optimize phase in
+`train_ppo.py`) before
 discarding the rollout and starting the next outer iteration.
 
 All three terms share the same logits / backbone in the default
@@ -700,7 +696,7 @@ numbers look finite.
 
 ## 6. What to commit to `notes/04-ppo-policy.md`
 
-After Problems 4.5, 4.6, 4.7, add:
+After [FILL 4.5], [FILL 4.6], and [FILL 4.7], add:
 
 - Your own derivation of the clipped-surrogate piecewise gradient
   (the table in §2.2, with the case-by-case derivation written out).

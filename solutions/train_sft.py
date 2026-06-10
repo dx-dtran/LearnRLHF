@@ -19,6 +19,13 @@ Derivation you should be able to do on paper (see notes/02-sft.md):
         dL/dlogits_t = m_t * (softmax(logits_t) - onehot(y_t)) / N.
 """
 
+import os as _os
+import sys as _sys
+
+# make `python solutions/train_*.py` runnable: repo root provides data_hh/config,
+# while this directory's own model/tokenizer/ppo_core shadow the scaffolds
+_sys.path.insert(1, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import math
 import time
 
@@ -49,8 +56,9 @@ def sft_loss(
     No F.cross_entropy(..., ignore_index=-100) tricks: multiply the mask in
     explicitly so the gradient path stays visible.
     """
-    # ================================ YOUR CODE (~3 lines) ==========================
-    raise NotImplementedError("[FILL 2.2] sft_loss")
+    logp = F.log_softmax(logits, dim=-1)
+    nll = -logp.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    return (nll * loss_mask).sum() / loss_mask.sum().clamp_min(1.0)
 
 
 # =====================================================================================

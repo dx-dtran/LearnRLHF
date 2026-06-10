@@ -22,10 +22,13 @@ from data_hh import (
 
 FAKE_CHOSEN = "\n\nHuman: Hi.\n\nAssistant: Hello!\n\nHuman: Another?\n\nAssistant: Sure."
 FAKE_REJECTED = "\n\nHuman: Hi.\n\nAssistant: Hello!\n\nHuman: Another?\n\nAssistant: No."
+# distinct prompts per row: PromptDataset dedupes repeated prompts
 FAKE_ROWS = [
-    {"chosen": FAKE_CHOSEN, "rejected": FAKE_REJECTED},
-    {"chosen": FAKE_CHOSEN, "rejected": FAKE_REJECTED},
-    {"chosen": FAKE_CHOSEN, "rejected": FAKE_REJECTED},
+    {
+        "chosen": FAKE_CHOSEN.replace("Hi.", f"Hi number {i}."),
+        "rejected": FAKE_REJECTED.replace("Hi.", f"Hi number {i}."),
+    }
+    for i in range(3)
 ]
 
 

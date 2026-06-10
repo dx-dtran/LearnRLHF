@@ -54,8 +54,8 @@ def gather_logprobs(logits: torch.Tensor, target_ids: torch.Tensor) -> torch.Ten
     the slice. To score response tokens from a forward over [prompt + response],
     pass logits[:, T_p-1:-1, :] (logits at position i predict token i+1).
     """
-    # ================================ YOUR CODE (~2 lines) ==========================
-    raise NotImplementedError("[FILL 4.1] gather_logprobs")
+    logp = F.log_softmax(logits, dim=-1)
+    return logp.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
 
 
 # =====================================================================================
@@ -148,8 +148,7 @@ def kl_k1(logprobs: torch.Tensor, ref_logprobs: torch.Tensor) -> torch.Tensor:
     Unbiased single-sample estimate of KL(pi || pi_ref); signed, can be negative on
     any one token.
     """
-    # ================================ YOUR CODE (1 line) ============================
-    raise NotImplementedError("[FILL 4.2] kl_k1")
+    return logprobs - ref_logprobs
 
 
 def kl_k3(logprobs: torch.Tensor, ref_logprobs: torch.Tensor) -> torch.Tensor:
@@ -162,8 +161,8 @@ def kl_k3(logprobs: torch.Tensor, ref_logprobs: torch.Tensor) -> torch.Tensor:
     Note the direction: with samples from pi, the estimator uses the INVERSE ratio
     pi_ref/pi = exp(-logratio). It is >= 0 because e^x - 1 - x >= 0 for all x.
     """
-    # ================================ YOUR CODE (~2 lines) ==========================
-    raise NotImplementedError("[FILL 4.2] kl_k3")
+    logratio = logprobs - ref_logprobs
+    return torch.exp(-logratio) - 1 + logratio
 
 
 # =====================================================================================
@@ -186,8 +185,11 @@ def shape_reward(
     Last real index = response_mask.sum(-1) - 1 (responses always have >= 1 real
     token). Pad positions get reward 0.
     """
-    # ================================ YOUR CODE (~4 lines) ==========================
-    raise NotImplementedError("[FILL 4.3] shape_reward")
+    rewards = -kl_coef * kl_t * response_mask
+    last_idx = (response_mask.sum(dim=1).long() - 1).clamp_min(0)
+    rewards = rewards.clone()
+    rewards[torch.arange(rewards.size(0), device=rewards.device), last_idx] += rm_reward
+    return rewards
 
 
 # =====================================================================================
@@ -215,11 +217,17 @@ def gae(
 
     A plain python loop over t from T-1 down to 0 is exactly right here.
     """
-    # ================================ YOUR CODE (~10 lines) =========================
-    # Allocate advantages, loop t = T-1 .. 0 keeping a running A_{t+1}, apply the
-    # recursion above, return (advantages, advantages + values).
-    # ================================================================================
-    raise NotImplementedError("[FILL 4.4] gae")
+    B, T = rewards.shape
+    advantages = torch.zeros_like(rewards)
+    next_adv = torch.zeros(B, dtype=rewards.dtype, device=rewards.device)
+    for t in reversed(range(T)):
+        nonterm = mask[:, t + 1] if t + 1 < T else torch.zeros_like(mask[:, t])
+        next_value = values[:, t + 1] if t + 1 < T else torch.zeros_like(values[:, t])
+        delta = rewards[:, t] + gamma * next_value * nonterm - values[:, t]
+        next_adv = delta + gamma * lam * next_adv * nonterm
+        advantages[:, t] = next_adv
+    returns = advantages + values
+    return advantages, returns
 
 
 # =====================================================================================
@@ -246,8 +254,11 @@ def ppo_policy_loss(
         unclipped tokens:  dL/dlogprobs_new_t = -A_t * ratio_t / N
         clipped tokens (min picks the clamped branch): exactly zero.
     """
-    # ================================ YOUR CODE (~5 lines) ==========================
-    raise NotImplementedError("[FILL 4.5] ppo_policy_loss")
+    ratio = torch.exp(logprobs_new - logprobs_old)
+    surr1 = ratio * advantages
+    surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantages
+    per_token = -torch.min(surr1, surr2)
+    return (per_token * mask).sum() / mask.sum().clamp_min(1.0)
 
 
 # =====================================================================================
@@ -271,8 +282,11 @@ def value_loss(
     within one PPO phase; early in training the value loss otherwise dominates and
     destabilizes the advantages computed from it.
     """
-    # ================================ YOUR CODE (~4 lines) ==========================
-    raise NotImplementedError("[FILL 4.6] value_loss")
+    v_clip = values_old + torch.clamp(values_new - values_old, -clip_eps_v, clip_eps_v)
+    per_token = 0.5 * torch.maximum(
+        (values_new - returns) ** 2, (v_clip - returns) ** 2
+    )
+    return (per_token * mask).sum() / mask.sum().clamp_min(1.0)
 
 
 # =====================================================================================
@@ -291,8 +305,9 @@ def masked_entropy(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     log_softmax keeps it numerically stable. Gradient, for the derivation:
     dH/dlogits = -p * (logp + H), elementwise per position.
     """
-    # ================================ YOUR CODE (~3 lines) ==========================
-    raise NotImplementedError("[FILL 4.7] masked_entropy")
+    logp = F.log_softmax(logits, dim=-1)
+    h = -(logp.exp() * logp).sum(dim=-1)
+    return (h * mask).sum() / mask.sum().clamp_min(1.0)
 
 
 # =====================================================================================
@@ -314,5 +329,7 @@ def normalize_advantages(
     Getting this mask wrong is the single most common PPO bug: one batch of garbage
     pad values in the std and every advantage in the batch is silently rescaled.
     """
-    # ================================ YOUR CODE (~4 lines) ==========================
-    raise NotImplementedError("[FILL 4.8] normalize_advantages")
+    n = mask.sum().clamp_min(1.0)
+    mean = (advantages * mask).sum() / n
+    var = (((advantages - mean) ** 2) * mask).sum() / n
+    return (advantages - mean) / (var.sqrt() + eps)

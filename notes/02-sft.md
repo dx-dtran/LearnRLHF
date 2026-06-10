@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Theory packet for Module 2 (Problems 2.1 through 2.5). The goal of Module 2 is
+Theory packet for Part 2 of the crash course. The goal of Part 2 is
 to take a pretrained GPT-2 and fine-tune it so that, given a user message in
-the chat format from Module 0, it produces an assistant reply that resembles
+the chat format from `00-data.md`, it produces an assistant reply that resembles
 the "chosen" replies from HH-RLHF.
 
 The training objective is the same next-token cross-entropy loss GPT-2 was
@@ -217,7 +217,7 @@ out. If the answer is "the assistant model", include it.
 
 ## 4. Gradient of softmax cross-entropy
 
-The PPO surrogate in Module 4 uses the same mechanics, so the derivation is
+The PPO surrogate in Part 4 uses the same mechanics, so the derivation is
 worth working through cleanly.
 
 ### 4.1 Setup
@@ -248,8 +248,7 @@ where $\delta_{v,u}$ is the Kronecker delta (1 if the subscripts are equal,
 
     d p[v] / d z[u] = p[v] * (delta(v, u) - p[u])
 
-To derive this, start from $p_v = \exp(z_v) / S$ where $S = \sum_{v'}
-\exp(z_{v'})$, and apply the quotient rule:
+To derive this, start from $p_v = \exp(z_v) / S$ where $S = \sum_{v'} \exp(z_{v'})$, and apply the quotient rule:
 
 $$
 \frac{\partial p_v}{\partial z_u}
@@ -337,8 +336,7 @@ confident.
 
 Step 2: the loss. $\ell = -\log p_y = -\log(0.628) \approx 0.465$.
 
-Step 3: the gradient. Use the formula $\partial \ell / \partial z = p -
-e_y$, where $e_y = (0, 1, 0)$ is the one-hot vector at index 1:
+Step 3: the gradient. Use the formula $\partial \ell / \partial z = p - e_y$, where $e_y = (0, 1, 0)$ is the one-hot vector at index 1:
 
 - $\partial \ell / \partial z_0 = 0.231 - 0 = +0.231$
 - $\partial \ell / \partial z_1 = 0.628 - 1 = -0.372$
@@ -351,8 +349,7 @@ gradient. With learning rate $\eta = 1.0$:
 - $z_1 \leftarrow 2.0 - (-0.372) = 2.372$ (dog logit went up)
 - $z_2 \leftarrow 0.5 - 0.140 = 0.360$ (fish logit went down)
 
-Recomputing softmax with the new logits gives $p \approx (0.154,\, 0.751,\,
-0.095)$. The model is now 75% confident in "dog", up from 63%. One gradient
+Recomputing softmax with the new logits gives $p \approx (0.154,\, 0.751,\, 0.095)$. The model is now 75% confident in "dog", up from 63%. One gradient
 step moved the prediction in the right direction by an amount determined by
 the gradient itself.
 
@@ -459,8 +456,8 @@ other token id, say `99`. That position has `loss_mask[2] = 0`, so:
 - The product `loss_mask[2] * ell[2]` is `0 * (anything) = 0`.
 - The numerator sum is unchanged. The denominator sum is unchanged.
 
-Result: `L_SFT ≈ 0.371`, identical. This is what the unit test in Problem
-2.2 asserts. Performing the flip in code, `(loss - loss_orig).abs().max()`
+Result: `L_SFT ≈ 0.371`, identical. This is what the unit test for
+[FILL 2.2] asserts. Performing the flip in code, `(loss - loss_orig).abs().max()`
 should be machine-zero.
 
 If the test fails, the most common cause is that the implementation
@@ -515,7 +512,7 @@ form is therefore robust to the shape of the batch.
 
 ## 5. Implementation checklist
 
-### 5.1 `sft_loss(logits, labels, loss_mask)` (Problem 2.2)
+### 5.1 `sft_loss(logits, labels, loss_mask)` ([FILL 2.2])
 
 Shapes:
 
@@ -543,7 +540,7 @@ printed, masked NLL values inspected, assistant-token loss compared to
 prompt-token loss, and tests written that flip masked labels. With
 `ignore_index`, that logic is implicit inside a library call.
 
-### 5.2 Gradient check (Problem 2.2)
+### 5.2 Gradient check ([FILL 2.2])
 
 Two tests:
 
@@ -558,7 +555,7 @@ Two tests:
    id. The loss must equal the original exactly, and the gradient must be
    elementwise identical.
 
-### 5.3 DataLoader (Problem 2.3)
+### 5.3 DataLoader (provided in `data_hh.py`)
 
 - Pad to the length of the longest example in the batch, not to the full
   `block_size`. If the batch's longest example is 300 tokens but padding
@@ -577,7 +574,7 @@ A real assistant token has `attention_mask = 1` and possibly `loss_mask =
 Padding has `attention_mask = 0` and `loss_mask = 0`. Treating "masked
 out of the loss" as equivalent to "invisible to the model" leads to bugs.
 
-### 5.4 Training loop (Problem 2.4)
+### 5.4 Training loop (provided in `train_sft.py`)
 
 Operational details:
 
@@ -603,7 +600,7 @@ the end.
 - Training loss typically drops from around 3.5 (base GPT-2 seeing
   chat-formatted text for the first time) down to roughly 1.5–2.0 by the
   end of epoch 2. Exact numbers depend on the tokenization and mask.
-- In the qualitative eval (Problem 2.5), the base model rambles, sometimes
+- In the qualitative eval (provided in `eval.py`), the base model rambles, sometimes
   invents "Human:" turns, or drifts off-topic. The SFT model should
   produce a single coherent assistant turn that ends cleanly with
   `<|im_end|>`.
@@ -623,12 +620,12 @@ is trustworthy.
 
 ## 6. What to commit to `notes/02-sft.md`
 
-After finishing Module 2, add:
+After finishing Part 2, add:
 
 - Your own re-derivation of the softmax cross-entropy gradient (photo of
   paper or typed).
 - Training and eval loss curves, or a short description ("loss dropped
   from 3.6 to 1.8 over two epochs, flattening in the last 500 steps").
-- Observations from the side-by-side in 2.5: what base GPT-2 says on the
+- Observations from the side-by-side in `eval.py`: what base GPT-2 says on the
   held-out prompts, what SFT says, where SFT still fails. Those failure
   modes motivate RLHF in the next modules.

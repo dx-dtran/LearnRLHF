@@ -2,24 +2,24 @@
 
 ## Purpose
 
-Methodology for Module 6 (Problems 6.1 through 6.3). After Modules 1–5,
+Methodology for the final evaluation. After Parts 1–5,
 three checkpoints exist on disk:
 
 - **base**: the raw pretrained GPT-2 from Hugging Face.
-- **sft**: the SFT checkpoint from Module 2.
-- **rlhf**: the PPO-trained policy from Module 5.
+- **sft**: the SFT checkpoint from Part 2.
+- **rlhf**: the PPO-trained policy from Part 5.
 
-Module 6 compares the three, qualitatively and via a small win-rate
+This step compares the three, qualitatively and via a small win-rate
 study. There is no new math here; the work is methodology and reading
 outputs by hand.
 
 This note covers three things:
 
 1. How to generate side-by-side responses from the three models on a
-   shared set of held-out prompts (Problem 6.1).
+   shared set of held-out prompts (`eval.py`, provided).
 2. How to compute a win-rate by blindly comparing SFT vs RLHF responses
-   pair-by-pair (Problem 6.2).
-3. What to record in the retrospective (Problem 6.3).
+   pair-by-pair (the win-rate exercise).
+3. What to record in the retrospective.
 
 Fill this file in with the actual outputs while running each problem.
 
@@ -44,7 +44,7 @@ The side-by-side table in §1 is where those differences become visible.
 
 ---
 
-## 1. Generation comparison (Problem 6.1)
+## 1. Generation comparison (`eval.py`)
 
 Build a table with one row per held-out prompt (target: 20 prompts) and one
 column per model (base, SFT, RLHF). Each cell holds the generated response,
@@ -144,7 +144,7 @@ that never emits `<|im_end|>` should be noted explicitly.
 
 ---
 
-## 2. Win-rate (Problem 6.2)
+## 2. Win-rate
 
 ### 2.1 Setup
 
@@ -236,7 +236,7 @@ iterations).
 
 ---
 
-## 3. The retrospective (Problem 6.3)
+## 3. The retrospective
 
 One page, answering the questions in §3.1–§3.6 directly.
 

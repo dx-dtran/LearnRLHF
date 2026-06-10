@@ -169,3 +169,12 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# OS junk
+.DS_Store
+
+# checkpoints and run artifacts
+*.pt
+hh_cache/
+ppo_log.csv
+ppo_plots.png

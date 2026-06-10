@@ -2,15 +2,15 @@
 
 ## Purpose
 
-Theory packet for Problem 4.4, and the conceptual backbone for all of
-Module 4. PPO has its own notation and its own machinery, almost none of
-which has appeared in earlier modules. This note builds it up gradually.
+Theory packet for [FILL 4.4], and the conceptual backbone for all of
+Part 4. PPO has its own notation and its own machinery, almost none of
+which has appeared in earlier parts. This note builds it up gradually.
 
 A reader can think of one PPO iteration as the following loop:
 
 1. Pick a batch of prompts.
 2. Sample a response from the current model for each prompt. ("Rollout.")
-3. Score each response with the reward model (Module 3) and combine that
+3. Score each response with the reward model (Part 3) and combine that
    score with a small per-token KL penalty (next note, `04-ppo-kl.md`).
    The result is a per-token reward signal.
 4. From the per-token rewards, compute, for every token in every response,
@@ -36,7 +36,7 @@ Sections in this note:
    and full Monte Carlo returns.
 5. GAE, a single tunable knob that interpolates between (4)'s extremes.
 6. How everything composes for per-token text rewards.
-7. Advantage normalization (Problem 4.8).
+7. Advantage normalization ([FILL 4.8]).
 
 If a term in this list is unfamiliar (TD, Monte Carlo, baseline), do not
 worry. Each is defined in the section it belongs to before being used.
@@ -69,8 +69,7 @@ Or in code-style:
 
     J(theta) = E_{tau ~ pi_theta} [ sum_t gamma^t * r_t ]
 
-$\gamma$ is a discount factor in $[0, 1]$. For text RL we use $\gamma =
-1$: episodes are short, and credit assignment should flow across the
+$\gamma$ is a discount factor in $[0, 1]$. For text RL we use $\gamma = 1$: episodes are short, and credit assignment should flow across the
 entire response without exponential dampening.
 
 With $\gamma = 1$, later text is not discounted merely because it
@@ -172,8 +171,7 @@ $$
 \nabla_\theta f = f \cdot \nabla_\theta \log f
 $$
 
-This follows from the chain rule for $\log$: $\nabla_\theta \log f =
-(1/f) \cdot \nabla_\theta f$, multiplied through by $f$. The trick
+This follows from the chain rule for $\log$: $\nabla_\theta \log f = (1/f) \cdot \nabla_\theta f$, multiplied through by $f$. The trick
 converts "gradient of a probability" into "probability times gradient
 of log-probability", which makes the gradient an expectation that can
 be estimated by averaging over samples.
@@ -248,8 +246,7 @@ $$
 $$
 
 Because $b(s_t)$ does not depend on $a$, it pulls out of the
-expectation over $a$. What remains is $\mathbb{E}_a[\nabla \log \pi(a
-\mid s_t)]$, which is zero. The one-line proof of that inner identity:
+expectation over $a$. What remains is $\mathbb{E}_a[\nabla \log \pi(a \mid s_t)]$, which is zero. The one-line proof of that inner identity:
 
 $$
 \mathbb{E}_a \bigl[\nabla \log \pi(a \mid s)\bigr]
@@ -271,8 +268,7 @@ Or in code-style:
     grad J = E[ sum_t grad log pi(a_t | s_t) * (G_hat_t - b(s_t)) ]
 
 Unbiased for any choice of $b$. A good choice of $b$ slashes the
-variance of the estimator. The best choice is $b(s_t) = \mathbb{E}[\hat
-G_t \mid s_t]$, the expected return starting from $s_t$, since
+variance of the estimator. The best choice is $b(s_t) = \mathbb{E}[\hat G_t \mid s_t]$, the expected return starting from $s_t$, since
 subtracting it leaves only the action-specific deviation from the
 average.
 
@@ -386,8 +382,7 @@ Or in code-style:
             = sum over k = 0..n-1 of gamma^k * delta_{t+k}
 
 (The second line is an algebraic identity: expand the definition of
-$\delta$ and the intermediate $V$ terms telescope. The $+\gamma
-V(s_{t+1})$ from $\delta_t$ cancels the $-V(s_{t+1})$ from
+$\delta$ and the intermediate $V$ terms telescope. The $+\gamma V(s_{t+1})$ from $\delta_t$ cancels the $-V(s_{t+1})$ from
 $\delta_{t+1}$, and so on.)
 
 As `n` grows, bias falls and variance rises. GAE provides a single
@@ -425,8 +420,7 @@ The knob is $\lambda$ in $[0, 1]$:
 
 ### 5.2 Deriving the recursion
 
-Split off the first term of the sum, then factor out one $(\gamma
-\lambda)$ from the rest:
+Split off the first term of the sum, then factor out one $(\gamma \lambda)$ from the rest:
 
 $$
 A_t^{\mathrm{GAE}}
@@ -507,7 +501,7 @@ cancel itself through the target. The code still runs, but the
 optimization problem becomes "move predictions and labels together",
 which weakens or destroys the value training signal.
 
-### 5.5 Unit test (Problem 4.4)
+### 5.5 Unit test ([FILL 4.4])
 
 Hand-computed 3-step example. Set `T = 3`, `values = [0, 0, 0]`,
 `rewards = [1, 0, 0]`, `mask = [1, 1, 1]`, `gamma = 1`, `lambda = 1`.
@@ -623,7 +617,7 @@ positions 3 and 4 (which are just padding) would leak into position
 2's computation. The mask zeroes them, so row 0's GAE advantages match
 what would be computed on a length-3 sequence in isolation.
 
-This is the bug that Problem 4.4's pad-in-the-middle test catches. If
+This is the bug that [FILL 4.4]'s pad-in-the-middle test catches. If
 the `nonterm` factor is forgotten on the bootstrap, both rows still
 produce numbers, but row 0's advantages will be wrong in a way that
 depends on the (arbitrary) padding values.
@@ -672,7 +666,7 @@ Two consequences:
 
 ---
 
-## 7. Advantage normalization (Problem 4.8)
+## 7. Advantage normalization ([FILL 4.8])
 
 Before feeding advantages into the PPO policy loss, normalize them
 across valid tokens to mean 0 and std 1:
