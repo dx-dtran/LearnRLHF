@@ -5,7 +5,9 @@
 A teaching-grade implementation of InstructGPT-style RLHF (Ouyang et al. 2022) on
 GPT-2 small, trainable on a single 24GB RTX GPU, using the Anthropic HH-RLHF dataset.
 
-Format: **fill-in-the-blank, CS231n style, sized for one focused weekend.** All
+Format: **fill-in-the-blank, CS231n style.** The core is five sessions (a long
+weekend if crammed, a week and a half of evenings at a sane pace); optional
+extensions fill out a second week. All
 plumbing (data pipeline, training loops, rollout generation, weight loading, eval)
 is provided and tested. The learner (`daniel@`) writes only the parts that carry the
 ideas — about 14 blanks, each a few lines, each with a formula in its docstring and
@@ -34,25 +36,31 @@ In scope:
 - Single GPU. `GPTConfig.from_name` instantiates small/medium/large/xl even if the
   big ones OOM in training.
 
-Out of scope: DDP/FSDP/ZeRO/DeepSpeed, LoRA/PEFT, custom kernels, KV cache (unless
-rollouts are unbearably slow), tokenizer training, labeling UI, LLM-as-judge eval.
+Out of scope: DDP/FSDP/ZeRO/DeepSpeed, LoRA/PEFT, custom kernels, tokenizer
+training, labeling UI, LLM-as-judge eval. (A KV cache is not in the core either,
+but it is the first listed extension.)
 
-## 2. The course (weekend schedule)
+## 2. The course (five core sessions + extensions)
 
 Each blank is marked in the source as `[FILL N.M]` with a `YOUR CODE` banner. Tests
 skip while a blank is unfilled and fail only on wrong implementations.
 
-| Part | When | Blanks | Files |
+| Part | Session | Blanks | Files |
 |---|---|---|---|
-| 1. Model | Sat AM (~3h) | 1.1 attention math, 1.2 GPT.forward_hidden | `model.py` |
-| 2. SFT | Sat PM (~2h + GPU) | 2.1 build_sft_example (loss mask), 2.2 sft_loss | `tokenizer.py`, `train_sft.py` |
-| 3. RM | Sat eve (~1.5h + GPU) | 3.1 last-token pooling, 3.2 bt_loss | `train_rm.py` |
-| 4. PPO core | Sun (~4-5h) | 4.1 gather_logprobs, 4.2 kl_k1/kl_k3, 4.3 shape_reward, 4.4 gae, 4.5 ppo_policy_loss, 4.6 value_loss, 4.7 masked_entropy, 4.8 normalize_advantages | `ppo_core.py` |
-| 5. Run + eval | Sun eve | none — run `train_ppo.py`, then `eval.py` | provided |
+| 1. Model | 1 (~3h) | 1.1 attention math, 1.2 GPT.forward_hidden | `model.py` |
+| 2. SFT | 2 (~2h + GPU) | 2.1 build_sft_example (loss mask), 2.2 sft_loss | `tokenizer.py`, `train_sft.py` |
+| 3. RM | 3 (~1.5h + GPU) | 3.1 last-token pooling, 3.2 bt_loss | `train_rm.py` |
+| 4. PPO core | 4 (~4-5h) | 4.1 gather_logprobs, 4.2 kl_k1/kl_k3, 4.3 shape_reward, 4.4 gae, 4.5 ppo_policy_loss, 4.6 value_loss, 4.7 masked_entropy, 4.8 normalize_advantages | `ppo_core.py` |
+| 5. Run + eval | 5 | none — run `train_ppo.py`, then `eval.py` | provided |
 
 Gate between parts: the relevant tests must be green before moving on. The smoke
 tests (`tests/test_training_smoke.py`) are the gate for Part 4 — they train tiny
 models on CPU and assert SFT loss drops, RM accuracy rises, and PPO reward climbs.
+
+Extensions (optional, self-directed, see README "Extensions"): KV cache, k2
+estimator comparison, RM calibration curve, best-of-n baseline, separate value
+backbone, gpt2-medium run, hyperparameter sweeps. New extensions land as
+scaffold-blank + solutions + test like everything else, only when the learner asks.
 
 ## 3. Hardware & memory budget (24GB)
 

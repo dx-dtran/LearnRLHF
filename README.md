@@ -1,4 +1,4 @@
-# LearnRLHF — InstructGPT PPO on GPT-2, as a weekend crash course
+# LearnRLHF — InstructGPT PPO on GPT-2, as a crash course
 
 From-scratch InstructGPT-style RLHF (Ouyang et al. 2022) on GPT-2 small, single 24GB
 GPU, pure PyTorch. No `trl`, no `accelerate`, no `transformers.Trainer`.
@@ -8,7 +8,12 @@ pipeline, training loops, rollout generation, weight loading, evaluation — is 
 and tested. You write the parts that carry the ideas: the losses, the advantage
 estimator, the KL penalty, the attention math. Each blank is a handful of lines, has
 the formula in its docstring, and has a test (usually a gradient check) waiting for
-it. Roughly 14 blanks, 12–16 focused hours total.
+it. Roughly 14 blanks.
+
+Pacing: the core is five sessions, 12–16 focused hours plus GPU time — a long
+weekend if you cram, or a comfortable week and a half of evenings. The
+[extensions](#extensions) at the bottom fill out a second week if you want to go
+deeper; none of them are required for the headline result.
 
 The goal hasn't changed: at the end you can derive every gradient in SFT, RM, and PPO
 on paper, and you have a GPT-2 that visibly follows instructions better than the
@@ -52,9 +57,9 @@ pip install -r requirements.txt
 pytest tests/test_grad_check.py -q     # 3 passed = environment works
 ```
 
-## The schedule
+## The path
 
-### Saturday morning — Part 1: the model (~3 h)
+### Session 1 — Part 1: the model (~3 h)
 
 Read `notes/01-gpt2.md` as needed. LayerNorm, the MLP, the block structure, weight
 loading, and sampling are provided; you write the two pieces that matter:
@@ -69,7 +74,7 @@ phase left-pads prompts, and `test_gpt_left_padding_consistent` is the contract 
 whole pipeline relies on. When green, run the (slow, downloads ~500MB) parity check
 once: `pytest tests/test_model.py -m slow`.
 
-### Saturday afternoon — Part 2: SFT (~2 h + GPU time)
+### Session 2 — Part 2: SFT (~2 h + GPU time)
 
 Read `notes/02-sft.md`. The dataset, collate, optimizer, and training loop are
 provided.
@@ -82,13 +87,13 @@ provided.
 Derive `dL/dlogits` on paper before you code 2.2 — it's the one gradient everyone
 memorizes, derive it anyway. Tests: `test_tokenizer.py`, `test_data.py`,
 `test_grad_sft.py`. Then kick off training (a few hours on a 24GB card; let it run
-while you do Part 3's math):
+while you start Session 3's math):
 
 ```bash
 python train_sft.py        # writes sft.pt
 ```
 
-### Saturday evening — Part 3: reward model (~1.5 h + GPU time)
+### Session 3 — Part 3: reward model (~1.5 h + GPU time)
 
 Read `notes/03-rm.md`.
 
@@ -104,7 +109,7 @@ Derive both gradients of the pair loss and notice they're exact negatives. Tests
 python train_rm.py         # needs sft.pt; writes rm.pt; expect >= 65% pairwise acc
 ```
 
-### Sunday — Part 4: PPO core (~4–5 h)
+### Session 4 — Part 4: PPO core (~4–5 h, the longest session)
 
 The heart of the course. Read `notes/04-ppo-gae.md`, `notes/04-ppo-kl.md`,
 `notes/04-ppo-policy.md` alongside the blanks. All nine live in `ppo_core.py`, each
@@ -133,7 +138,7 @@ pytest tests/test_training_smoke.py -q
 
 If those pass, your math is not just plausibly right, it demonstrably optimizes.
 
-### Sunday evening — Part 5: the real run (~30 min of your time + GPU hours)
+### Session 5 — Part 5: the real run (~30 min of your time + GPU hours)
 
 `train_ppo.py` is fully provided — read it top to bottom (it's the glue you just
 built parts for), then:
@@ -155,6 +160,47 @@ python eval.py --models base,sft,rlhf --n 20 --out notes/06-eval.md
 
 Blind yourself to which column is which and score SFT vs RLHF on the 20 prompts.
 Target: RLHF wins a majority.
+
+## Extensions
+
+The core course above gets you the result. If you have a second week, these are
+worth the time, roughly in order of payoff. They are self-directed: no scaffolding,
+but the repo gives you everything you need, and each one has a concrete
+done-criterion.
+
+1. **KV cache.** Rollouts re-run the full forward for every generated token —
+   O(T^2) per response. Add a KV cache to `GPT` and use it in `generate` and
+   `generate_with_logprobs`. Done when: cached and uncached generation produce
+   identical tokens and logprobs under a fixed seed (write that test), and
+   `tokens_per_sec` in `ppo_log.csv` goes up by an order of magnitude.
+
+2. **The k2 estimator, empirically.** Add `kl_k2` (`0.5 * logratio**2`) next to k1
+   and k3, then take a trained checkpoint and estimate the true KL three ways over a
+   few thousand sampled tokens. Done when: you have a plot of estimator mean and
+   variance vs sample count and can explain when each is the right tool.
+
+3. **RM calibration curve.** Bradley–Terry says the score gap is a probability:
+   P(chosen wins) = sigmoid(r_c - r_r). Bucket held-out pairs by score gap and plot
+   predicted vs empirical win rate. Done when: you can say concretely whether your
+   RM is over- or under-confident, and what that means for `kl_coef`.
+
+4. **Best-of-n baseline.** Sample n=4/16/64 responses from the SFT model, keep the
+   RM-argmax. Done when: you have a win-rate table of best-of-n vs your PPO policy
+   and can articulate the compute tradeoff (n forward passes per answer vs one).
+
+5. **Separate value backbone.** Swap the shared-backbone value head for a full
+   value model (its own GPT-2, init from sft.pt). Done when: you can show value
+   loss curves for shared vs separate on the same prompts and explain the memory
+   bill you paid for the difference.
+
+6. **gpt2-medium.** `GPTConfig.from_name("gpt2-medium")` plus
+   `gradient_checkpointing=True`, re-run all three phases. Done when: the eval
+   table has a medium column and you know the new tokens/sec and peak memory.
+
+7. **Sweeps that build intuition.** One knob at a time, three values, same seed:
+   `kl_coef` (0, 0.02, 0.2), `policy_lr`, `clip_eps`. Done when: you can show a
+   reward-hacked run (kl_coef=0), a healthy run, and an over-anchored run, and
+   identify each from the log curves alone.
 
 ## Repo layout
 
