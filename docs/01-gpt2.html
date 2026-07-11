@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPT-2 anatomy — LearnRLHF</title>
+<meta name="description" content="The residual stream, attention as a lookup, LayerNorm, and sampling — the concepts behind Module 1.">
+<link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="topbar">
+  <a href="index.html">← All guides</a>
+  <span class="crumb">Module 1</span>
+</nav>
+
+<h1>GPT-2 anatomy</h1>
+<p class="subtitle">What you should see in your head while writing <code>model.py</code>.</p>
+
+<h2><span class="secno">1</span>The residual stream</h2>
+
+<p>The most useful mental model of a transformer is not "a stack of layers" but a
+<strong>residual stream</strong>: each token owns a vector of width
+<var>C</var> = 768, and that vector flows unchanged from bottom to top unless a block
+explicitly adds something to it.</p>
+
+<figure class="viz">
+  <svg viewBox="0 0 360 260" id="rs-svg" role="img" aria-label="Residual stream diagram: embeddings feed a vertical stream; attention and MLP branches read from it and add back into it; final LayerNorm and tied unembedding produce logits."></svg>
+  <figcaption>One token's path. Blocks are read–modify–<em>add</em>, never
+  read–modify–replace. The stream is why 12-block gradients don't vanish: the identity
+  path is always there.</figcaption>
+</figure>
+
+<p>Three consequences worth internalizing before problem 1.5:</p>
+<ul>
+  <li><strong>Pre-LN placement.</strong> LayerNorm sits <em>inside</em> each branch
+  (<code>x + attn(ln(x))</code>), so the stream itself is never normalized between
+  blocks. The branch sees clean statistics; the highway stays untouched.</li>
+  <li><strong>Attention is the only place tokens talk.</strong> The MLP is applied to
+  each position independently. If information needs to move between positions, attention
+  moved it.</li>
+  <li><strong>Tied unembedding.</strong> The final projection to vocabulary logits reuses
+  the token-embedding matrix, transposed. Reading out is the inverse of reading in.</li>
+</ul>
+
+<h2><span class="secno">2</span>Attention is a soft lookup</h2>
+
+<p>Each position emits a <em>query</em> ("what am I looking for?"), and every position
+emits a <em>key</em> ("what do I contain?") and a <em>value</em> ("what will I hand over
+if matched?"). The output at a position is a weighted average of past values, weights
+given by softmax of query·key. The causal mask limits the lookup to the past — position
+<var>t</var> may only read positions ≤ <var>t</var>.</p>
+
+<figure class="viz">
+  <div class="tokrow" id="att-toks"></div>
+  <svg viewBox="0 0 360 110" id="att-svg"></svg>
+  <div class="readout" id="att-read"></div>
+  <figcaption>Tap a token to make it the query. Bars show where its attention lands
+  (one illustrative head). Hatched positions are in the future — the causal mask sets
+  their weights to exactly zero <em>before</em> the softmax, by adding −∞ to the score.</figcaption>
+</figure>
+
+<p>Notice how <em>ball</em> pulls from <em>red</em> and <em>picked</em>: the head is
+assembling "what is being picked up, and what is it like?" into the vector that will
+predict the next token. Real heads are messier, but this is the operation.</p>
+
+<div class="callout gotcha">
+  <span class="tag">Gotcha — problem 1.3</span>
+  Scale scores by 1/√<var>d<sub>k</sub></var> (per-head dim, 64), not 1/√<var>C</var>.
+  And apply the mask before softmax, not after — masking probabilities after softmax
+  leaves rows that don't sum to 1 and a gradient path to the future.
+</div>
+
+<h2><span class="secno">3</span>LayerNorm: same shape, fixed statistics</h2>
+
+<p>LayerNorm re-centers and re-scales each token's vector so it has mean 0 and variance 1
+<em>across the channel dimension</em>, then applies a learned per-channel gain and bias.
+It is a per-token operation — no batch statistics, no interaction between positions.</p>
+
+<figure class="viz">
+  <div class="ctl">
+    <label>shift the input by <span class="val" id="ln-b-val">0.0</span>
+      <input type="range" id="ln-b" min="-3" max="3" step="0.1" value="0"></label>
+    <label>scale the input by <span class="val" id="ln-s-val">1.0×</span>
+      <input type="range" id="ln-s" min="0.25" max="4" step="0.05" value="1"></label>
+  </div>
+  <svg viewBox="0 0 360 150" id="ln-svg"></svg>
+  <div class="legend">
+    <span><span class="key" style="background:var(--muted)"></span>input vector</span>
+    <span><span class="key" style="background:var(--blue)"></span>after LayerNorm</span>
+  </div>
+  <figcaption>Shift or scale the input however you like — the output does not move.
+  LayerNorm erases the first two moments; only the <em>shape</em> of the vector survives.</figcaption>
+</figure>
+
+<p>That invariance is the point: whatever the residual stream has accumulated, each
+branch sees inputs at a standard scale. The learned gain and bias then let the network
+re-introduce any scale it actually wants — the erasure is undone-able, but now it is a
+<em>choice</em> made by parameters, not an accident of depth.</p>
+
+<div class="callout check">
+  <span class="tag">Grad-check note — problem 1.2</span>
+  The interesting terms in the backward pass come from the mean and variance depending on
+  every element: perturb one input channel and all outputs move. Your centered-difference
+  check will catch a forgotten term instantly; that is why LayerNorm is the first thing
+  the course makes you differentiate.
+</div>
+
+<h2><span class="secno">4</span>MLP: the per-token half</h2>
+
+<p>The other branch is two linear layers with a GELU between: expand 768 → 3072, apply
+GELU, project back. It holds most of the parameters and does the per-token processing —
+"given what attention gathered here, compute something." GPT-2 uses <em>exact</em> GELU
+(the Gaussian CDF), not the tanh approximation; the difference is small but will show up
+when you diff your forward pass against HuggingFace in 1.7.</p>
+
+<h2><span class="secno">5</span>Loading the real weights</h2>
+
+<p>Problem 1.7 is bookkeeping, and the bookkeeping has one famous trap:</p>
+
+<div class="callout gotcha">
+  <span class="tag">Gotcha — Conv1D</span>
+  HF's GPT-2 stores <code>c_attn</code>, <code>c_proj</code>, <code>c_fc</code> as
+  <code>Conv1D</code>, whose weight is the <em>transpose</em> of an
+  <code>nn.Linear</code> weight. Copy without transposing and the model still runs —
+  shapes are square for <code>c_proj</code> — and generates plausible-looking garbage.
+  The parity test (max abs diff &lt; 1e-4 against HF's forward) is your only defense.
+</div>
+
+<h2><span class="secno">6</span>Sampling: shaping the next-token distribution</h2>
+
+<p>Generation is just: forward pass, get a distribution over 50k tokens, pick one, repeat.
+The knobs in problem 1.8 all reshape that distribution before you sample. This matters
+later — PPO rollouts sample at temperature 1 from the raw distribution, and entropy
+collapse (Module 4) is literally this picture narrowing to a spike.</p>
+
+<figure class="viz">
+  <p style="margin:0 0 0.3rem;font-size:0.85rem;color:var(--ink-2)">
+    Next token after <span class="mono">"The capital of France is"</span>:</p>
+  <div class="ctl">
+    <label>temperature <span class="val" id="sm-t-val">1.0</span>
+      <input type="range" id="sm-t" min="0.1" max="3" step="0.05" value="1"></label>
+    <div class="seg" role="group" aria-label="truncation" id="sm-seg">
+      <button aria-pressed="true">no cutoff</button>
+      <button aria-pressed="false">top-k = 3</button>
+      <button aria-pressed="false">top-p = 0.9</button>
+    </div>
+  </div>
+  <svg viewBox="0 0 360 170" id="sm-svg"></svg>
+  <div class="readout" id="sm-read"></div>
+  <figcaption>Temperature divides the logits before softmax: below 1 sharpens, above 1
+  flattens. Top-k and top-p then delete the tail and renormalize what is left (faded
+  bars are deleted). Order matters: temperature first, truncation second.</figcaption>
+</figure>
+
+<p>Two edge cases your <code>generate()</code> must handle: temperature → 0 becomes
+argmax (guard the division), and top-p must always keep at least one token even when the
+best token alone exceeds <var>p</var>.</p>
+
+<nav class="pager">
+  <a href="index.html"><span class="dir">Previous</span>Overview</a>
+  <a href="02-sft.html"><span class="dir">Next</span>SFT and the loss mask</a>
+</nav>
+
+</div>
+<script>
+(function () {
+  function cssv(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+  function onTheme(fn) {
+    if (window.matchMedia) {
+      window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", fn);
+    }
+  }
+
+  /* ---- residual stream diagram ---- */
+  function drawStream() {
+    var blue = cssv("--blue"), aqua = cssv("--aqua"), axis = cssv("--axis"),
+        muted = cssv("--muted"), ink = cssv("--ink"), tint = cssv("--blue-tint");
+    var sx = 92;   /* stream x */
+    var s = "";
+    function box(x, y, w, h, label, stroke) {
+      return '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h +
+        '" rx="7" fill="none" stroke="' + stroke + '" stroke-width="1.3"/>' +
+        '<text x="' + (x + w / 2) + '" y="' + (y + h / 2 + 3.5) + '" text-anchor="middle" font-size="10" fill="' + ink + '">' + label + "</text>";
+    }
+    function arrow(x1, y1, x2, y2, color) {
+      var a = Math.atan2(y2 - y1, x2 - x1);
+      function pt(d, off) { return (x2 - d * Math.cos(a - off)).toFixed(1) + " " + (y2 - d * Math.sin(a - off)).toFixed(1); }
+      return '<path d="M' + x1 + " " + y1 + " L" + x2 + " " + y2 + '" stroke="' + color + '" stroke-width="1.4" fill="none"/>' +
+        '<path d="M' + pt(6, 0.45) + " L" + x2 + " " + y2 + " L" + pt(6, -0.45) + '" fill="none" stroke="' + color + '" stroke-width="1.4"/>';
+    }
+    /* stream spine */
+    s += '<path d="M' + sx + ' 238 L' + sx + ' 86" stroke="' + blue + '" stroke-width="3" stroke-linecap="round"/>';
+    s += '<text x="' + (sx - 10) + '" y="150" text-anchor="middle" font-size="9.5" fill="' + muted + '" transform="rotate(-90 ' + (sx - 10) + ' 150)">residual stream (768-dim)</text>';
+    /* bottom: embeddings */
+    s += box(sx - 62, 238 - 18, 124, 22, "wte[token] + wpe[pos]", axis);
+    /* block bracket */
+    s += '<rect x="' + (sx + 26) + '" y="118" width="212" height="98" rx="10" fill="' + tint + '" stroke="none"/>';
+    s += '<text x="' + (sx + 34) + '" y="211" font-size="9" fill="' + muted + '">×12 blocks</text>';
+    /* attn branch */
+    var byA = 192, byM = 152;
+    s += arrow(sx, byA, sx + 66, byA, muted);
+    s += box(sx + 66, byA - 11, 46, 22, "ln_1", axis);
+    s += arrow(sx + 112, byA, sx + 130, byA, muted);
+    s += box(sx + 130, byA - 11, 62, 22, "attention", aqua);
+    s += arrow(sx + 192, byA, sx + 226, byA, muted);
+    s += '<path d="M' + (sx + 226) + " " + byA + " L" + (sx + 238) + " " + byA + " L" + (sx + 238) + " " + (byA - 22) + '" stroke="' + muted + '" stroke-width="1.4" fill="none"/>';
+    /* add joins */
+    s += '<circle cx="' + sx + '" cy="' + (byA - 22) + '" r="7" fill="none" stroke="' + blue + '" stroke-width="1.6"/>' +
+         '<text x="' + sx + '" y="' + (byA - 18.5) + '" text-anchor="middle" font-size="11" fill="' + blue + '">+</text>';
+    s += arrow(sx + 238, byA - 22, sx + 9, byA - 22, muted);
+    /* mlp branch */
+    s += arrow(sx, byM, sx + 66, byM, muted);
+    s += box(sx + 66, byM - 11, 46, 22, "ln_2", axis);
+    s += arrow(sx + 112, byM, sx + 130, byM, muted);
+    s += box(sx + 130, byM - 11, 62, 22, "MLP", aqua);
+    s += arrow(sx + 192, byM, sx + 226, byM, muted);
+    s += '<path d="M' + (sx + 226) + " " + byM + " L" + (sx + 238) + " " + byM + " L" + (sx + 238) + " " + (byM - 22) + '" stroke="' + muted + '" stroke-width="1.4" fill="none"/>';
+    s += '<circle cx="' + sx + '" cy="' + (byM - 22) + '" r="7" fill="none" stroke="' + blue + '" stroke-width="1.6"/>' +
+         '<text x="' + sx + '" y="' + (byM - 18.5) + '" text-anchor="middle" font-size="11" fill="' + blue + '">+</text>';
+    s += arrow(sx + 238, byM - 22, sx + 9, byM - 22, muted);
+    /* top: ln_f + head */
+    s += arrow(sx, 100, sx + 66, 100, muted);
+    s += box(sx + 66, 89, 46, 22, "ln_f", axis);
+    s += arrow(sx + 112, 100, sx + 130, 100, muted);
+    s += box(sx + 130, 89, 92, 22, "wteᵀ (tied)", axis);
+    s += arrow(sx + 222, 100, sx + 252, 100, muted);
+    s += '<text x="354" y="88" text-anchor="end" font-size="10" fill="' + ink + '">logits (50257)</text>';
+    document.getElementById("rs-svg").innerHTML = s;
+  }
+
+  /* ---- attention widget ---- */
+  var attToks = ["The", "robot", "picked", "up", "the", "red", "ball"];
+  var attW = [
+    [1],
+    [0.30, 0.70],
+    [0.10, 0.75, 0.15],
+    [0.05, 0.25, 0.60, 0.10],
+    [0.35, 0.10, 0.30, 0.05, 0.20],
+    [0.10, 0.15, 0.20, 0.05, 0.30, 0.20],
+    [0.04, 0.08, 0.28, 0.04, 0.08, 0.40, 0.08]
+  ];
+  var attSel = 6;
+  var attRow = document.getElementById("att-toks");
+  attToks.forEach(function (t, i) {
+    var el = document.createElement("span");
+    el.className = "tok";
+    el.textContent = t;
+    el.addEventListener("click", function () { attSel = i; drawAtt(); });
+    attRow.appendChild(el);
+  });
+  function drawAtt() {
+    Array.prototype.forEach.call(attRow.children, function (el, i) {
+      el.className = "tok" + (i === attSel ? " sel on" : "");
+    });
+    var blue = cssv("--blue"), axis = cssv("--axis"), muted = cssv("--muted"), ink = cssv("--ink");
+    var n = attToks.length, w = 360 / n, base = 78, hmax = 62;
+    var row = attW[attSel];
+    var s = '<line x1="4" y1="' + base + '" x2="356" y2="' + base + '" stroke="' + axis + '" stroke-width="1"/>';
+    s += '<defs><pattern id="hatch" width="5" height="5" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">' +
+         '<line x1="0" y1="0" x2="0" y2="5" stroke="' + axis + '" stroke-width="1"/></pattern></defs>';
+    for (var i = 0; i < n; i++) {
+      var cx = i * w + w / 2;
+      if (i <= attSel) {
+        var v = row[i] || 0;
+        var h = Math.max(1.5, v * hmax);
+        s += '<rect x="' + (cx - 11) + '" y="' + (base - h) + '" width="22" height="' + h +
+             '" rx="3" fill="' + (i === attSel ? axis : blue) + '"/>';
+        if (v >= 0.18) {
+          s += '<text x="' + cx + '" y="' + (base - h - 4) + '" text-anchor="middle" font-size="9" fill="' + ink + '">' + v.toFixed(2) + "</text>";
+        }
+      } else {
+        s += '<rect x="' + (cx - 11) + '" y="' + (base - 26) + '" width="22" height="26" rx="3" fill="url(#hatch)" opacity="0.7"/>';
+      }
+      s += '<text x="' + cx + '" y="' + (base + 14) + '" text-anchor="middle" font-size="9.5" fill="' + muted + '">' + attToks[i] + "</text>";
+    }
+    s += '<text x="' + (attSel * w + w / 2) + '" y="' + (base + 27) + '" text-anchor="middle" font-size="9" font-weight="700" fill="' + blue + '">query</text>';
+    document.getElementById("att-svg").innerHTML = s;
+    document.getElementById("att-read").innerHTML =
+      "weights over allowed positions sum to <b>1.00</b> · future positions: <b>masked</b>";
+  }
+
+  /* ---- layernorm widget ---- */
+  var lnH = [2.1, -0.6, 1.2, 0.3, -1.4, 0.8, -0.2, 1.9];
+  var lnB = document.getElementById("ln-b"), lnS = document.getElementById("ln-s");
+  function drawLN() {
+    var b = parseFloat(lnB.value), sc = parseFloat(lnS.value);
+    document.getElementById("ln-b-val").textContent = b.toFixed(1);
+    document.getElementById("ln-s-val").textContent = sc.toFixed(2) + "×";
+    var x = lnH.map(function (v) { return sc * v + b; });
+    var m = x.reduce(function (a, v) { return a + v; }, 0) / x.length;
+    var va = x.reduce(function (a, v) { return a + (v - m) * (v - m); }, 0) / x.length;
+    var y = x.map(function (v) { return (v - m) / Math.sqrt(va + 1e-5); });
+    var blue = cssv("--blue"), axis = cssv("--axis"), mutd = cssv("--muted");
+    var mid = 75, scale = 5.2, n = x.length, w = 360 / n;
+    var s = '<line x1="4" y1="' + mid + '" x2="356" y2="' + mid + '" stroke="' + axis + '" stroke-width="1"/>';
+    for (var i = 0; i < n; i++) {
+      var cx = i * w + w / 2;
+      var hx = Math.max(-66, Math.min(66, x[i] * scale));
+      var hy = y[i] * 22;
+      function bar(cxo, hv, color) {
+        var top = hv >= 0 ? mid - hv : mid;
+        return '<rect x="' + cxo + '" y="' + top + '" width="10" height="' + Math.max(1, Math.abs(hv)) + '" rx="2.5" fill="' + color + '"/>';
+      }
+      s += bar(cx - 12, hx, mutd);
+      s += bar(cx + 2, hy, blue);
+    }
+    s += '<text x="6" y="14" font-size="9" fill="' + mutd + '">input mean ' + m.toFixed(2) + ", std " + Math.sqrt(va).toFixed(2) + "</text>";
+    s += '<text x="6" y="146" font-size="9" fill="' + blue + '">output mean 0.00, std 1.00 — always</text>';
+    document.getElementById("ln-svg").innerHTML = s;
+  }
+  lnB.addEventListener("input", drawLN);
+  lnS.addEventListener("input", drawLN);
+
+  /* ---- sampling widget ---- */
+  var smToks = ["␣Paris", "␣the", "␣a", "␣located", "␣one", "␣known", "␣Lyon", "␣banana"];
+  var smLogits = [3.2, 1.9, 1.4, 0.9, 0.6, 0.2, -0.3, -1.2];
+  var smMode = 0;
+  var smT = document.getElementById("sm-t");
+  var smSeg = document.getElementById("sm-seg");
+  Array.prototype.forEach.call(smSeg.children, function (b, i) {
+    b.addEventListener("click", function () { smMode = i; drawSM(); });
+  });
+  function drawSM() {
+    var T = parseFloat(smT.value);
+    document.getElementById("sm-t-val").textContent = T.toFixed(2);
+    Array.prototype.forEach.call(smSeg.children, function (b, i) {
+      b.setAttribute("aria-pressed", i === smMode ? "true" : "false");
+    });
+    var ex = smLogits.map(function (l) { return Math.exp(l / T); });
+    var Z = ex.reduce(function (a, v) { return a + v; }, 0);
+    var p = ex.map(function (v) { return v / Z; });
+    var keep = p.map(function () { return true; });
+    if (smMode === 1) { for (var i = 3; i < p.length; i++) keep[i] = false; }
+    if (smMode === 2) {
+      var acc = 0;
+      for (var j = 0; j < p.length; j++) {
+        if (acc >= 0.9) { keep[j] = false; } else { acc += p[j]; }
+      }
+    }
+    var kz = 0;
+    p.forEach(function (v, i) { if (keep[i]) kz += v; });
+    var q = p.map(function (v, i) { return keep[i] ? v / kz : 0; });
+    var blue = cssv("--blue"), axis = cssv("--axis"), muted = cssv("--muted"), ink = cssv("--ink");
+    var base = 128, hmax = 108, n = p.length, w = 360 / n;
+    var s = '<line x1="4" y1="' + base + '" x2="356" y2="' + base + '" stroke="' + axis + '" stroke-width="1"/>';
+    var kept = 0;
+    for (var k = 0; k < n; k++) {
+      var cx = k * w + w / 2;
+      if (keep[k]) {
+        kept++;
+        var h = Math.max(1.5, q[k] * hmax);
+        s += '<rect x="' + (cx - 13) + '" y="' + (base - h) + '" width="26" height="' + h + '" rx="3.5" fill="' + blue + '"/>';
+        if (q[k] >= 0.06) {
+          s += '<text x="' + cx + '" y="' + (base - h - 4) + '" text-anchor="middle" font-size="8.5" fill="' + ink + '">' + (q[k] * 100).toFixed(0) + "%</text>";
+        }
+      } else {
+        var h0 = Math.max(1.5, p[k] * hmax);
+        s += '<rect x="' + (cx - 13) + '" y="' + (base - h0) + '" width="26" height="' + h0 + '" rx="3.5" fill="' + axis + '" opacity="0.45"/>';
+      }
+      s += '<text x="' + cx + '" y="' + (base + 13) + '" text-anchor="middle" font-size="8" fill="' + muted + '">' + smToks[k] + "</text>";
+    }
+    document.getElementById("sm-svg").innerHTML = s;
+    var H = 0;
+    q.forEach(function (v) { if (v > 0) H -= v * Math.log(v); });
+    document.getElementById("sm-read").innerHTML =
+      "candidates kept: <b>" + kept + " / 8</b> · entropy of what you sample from: <b>" + H.toFixed(2) + " nats</b>";
+  }
+  smT.addEventListener("input", drawSM);
+
+  function all() { drawStream(); drawAtt(); drawLN(); drawSM(); }
+  all();
+  onTheme(all);
+})();
+</script>
+</body>
+</html>

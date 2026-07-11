@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reward model — LearnRLHF</title>
+<meta name="description" content="Bradley–Terry preference learning, last-token pooling, and reward calibration — the concepts behind Module 3.">
+<link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="topbar">
+  <a href="index.html">← All guides</a>
+  <span class="crumb">Module 3</span>
+</nav>
+
+<h1>Reward model</h1>
+<p class="subtitle">Turning "I liked this one better" into a differentiable number.</p>
+
+<h2><span class="secno">1</span>Why pairs, not scores</h2>
+
+<p>You could ask labelers to rate responses 1–10 and regress on the rating. In practice
+this fails: people use scales differently, drift over a session, and disagree with
+themselves. What people <em>are</em> reliable at is comparison — "this one is better."
+So the dataset is pairs, and the model's job is only to make the chosen response score
+higher than the rejected one. The absolute numbers mean nothing; only gaps do. Keep that
+in mind for §4 — it explains the histograms.</p>
+
+<h2><span class="secno">2</span>Architecture: one scalar, read at the right spot</h2>
+
+<p>The reward model is your SFT transformer with the vocabulary head swapped for
+<code>Linear(768, 1)</code>. It emits a scalar at <em>every</em> position, but only one
+matters: the last real token, where the model has read the entire prompt and response.</p>
+
+<figure class="viz">
+  <svg viewBox="0 0 360 132" id="pool-svg" role="img" aria-label="Two padded sequences in a batch; the reward is read at each sequence's last real token, not at the final padded position."></svg>
+  <figcaption>A batch pads to the longest sequence, so "last position" and "last real
+  token" are different things for every row but one. Index with per-row lengths, not
+  <code>[:, -1]</code>.</figcaption>
+</figure>
+
+<div class="callout gotcha">
+  <span class="tag">Gotcha — problem 3.1</span>
+  Reading the reward at a pad position is the RM's version of the loss-mask bug: the
+  model trains, accuracy climbs a little (pads still attend to real tokens), and
+  everything downstream — every PPO reward — is quietly computed from a garbage position.
+</div>
+
+<h2><span class="secno">3</span>Bradley–Terry: a sigmoid on the gap</h2>
+
+<p>Score both responses, take the gap Δ = <var>r</var><sub>c</sub> −
+<var>r</var><sub>r</sub>, and interpret σ(Δ) as "probability the human prefers the
+chosen one." The loss is the negative log of that probability.</p>
+
+<figure class="viz">
+  <div class="ctl">
+    <label>reward gap Δ = <var>r</var><sub>c</sub> − <var>r</var><sub>r</sub> : <span class="val" id="bt-d-val">0.0</span>
+      <input type="range" id="bt-d" min="-6" max="6" step="0.1" value="0"></label>
+  </div>
+  <svg viewBox="0 0 360 150" id="bt-svg"></svg>
+  <div class="readout" id="bt-read"></div>
+  <figcaption>Drag the gap. When the model already agrees with the human (Δ large), the
+  gradient vanishes — nothing to learn. When it disagrees (Δ negative), both rewards get
+  pushed hard, in opposite directions, by the same magnitude.</figcaption>
+</figure>
+
+<p>That equal-and-opposite structure is worth staring at:
+∂L/∂<var>r</var><sub>c</sub> = σ(Δ) − 1 and ∂L/∂<var>r</var><sub>r</sub> = 1 − σ(Δ).
+The pair only ever moves the gap; the mean of the two rewards gets no gradient at all.
+This is why RM scores have no absolute meaning, and it is the symmetry your grad check
+in 3.3 should confirm.</p>
+
+<div class="callout">
+  <span class="tag">Numerical stability</span>
+  Never compute <code>-log(sigmoid(d))</code> literally — for very negative Δ, the
+  sigmoid underflows to 0 and the log explodes. The same function is
+  <code>softplus(-d)</code>, which is stable everywhere. Same math, different overflow
+  behavior; your fp64 grad check won't care, but bf16 training will.
+</div>
+
+<h2><span class="secno">4</span>Reading the result</h2>
+
+<p>Two checks tell you the RM is real (problems 3.4–3.5):</p>
+
+<figure class="viz">
+  <svg viewBox="0 0 360 140" id="hist-svg" role="img" aria-label="Two heavily overlapping reward distributions for chosen and rejected responses, with the chosen mean slightly higher."></svg>
+  <div class="legend">
+    <span><span class="key" style="background:var(--blue)"></span>chosen responses</span>
+    <span><span class="key" style="background:var(--red)"></span>rejected responses</span>
+  </div>
+  <figcaption>Held-out reward histograms. Heavy overlap is expected — many pairs are
+  near-ties and labelers are noisy. What matters is the mean gap and pairwise accuracy,
+  not separation.</figcaption>
+</figure>
+
+<ul>
+  <li><strong>Pairwise accuracy ≥ 65%</strong> on held-out pairs. That sounds low; it is
+  roughly where InstructGPT's own RMs sat. Human agreement on HH is itself only
+  ~70-something percent — you cannot beat the noise ceiling of your labels.</li>
+  <li><strong>Overlapping histograms with a positive mean gap.</strong> If the two
+  distributions separate cleanly, be suspicious: the RM may have found a shortcut
+  (length, formatting) rather than quality. Shortcuts here become exploits in Module 5.</li>
+</ul>
+
+<p>One more design choice to internalize: the RM is initialized from <code>sft.pt</code>,
+not from base GPT-2. It needs to already speak the chat format and judge responses in
+the same distribution the policy will actually produce — and a judge that shares the
+policy's representation of "good text" is a fairer target for optimization.</p>
+
+<nav class="pager">
+  <a href="02-sft.html"><span class="dir">Previous</span>SFT and the loss mask</a>
+  <a href="04-ppo.html"><span class="dir">Next</span>PPO building blocks</a>
+</nav>
+
+</div>
+<script>
+(function () {
+  function cssv(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+
+  /* ---- pooling diagram ---- */
+  function drawPool() {
+    var blue = cssv("--blue"), axis = cssv("--axis"), muted = cssv("--muted"), ink = cssv("--ink");
+    var s = '<defs><pattern id="ph" width="5" height="5" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">' +
+      '<line x1="0" y1="0" x2="0" y2="5" stroke="' + axis + '" stroke-width="1"/></pattern></defs>';
+    var rows = [
+      { label: "row 0", real: 9, y: 26 },
+      { label: "row 1", real: 5, y: 76 }
+    ];
+    var n = 9, w = 30, gap = 4, x0 = 46;
+    rows.forEach(function (r) {
+      s += '<text x="4" y="' + (r.y + 14) + '" font-size="9" fill="' + muted + '">' + r.label + "</text>";
+      for (var i = 0; i < n; i++) {
+        var x = x0 + i * (w + gap);
+        var last = i === r.real - 1;
+        if (i < r.real) {
+          s += '<rect x="' + x + '" y="' + r.y + '" width="' + w + '" height="21" rx="5" fill="none" stroke="' +
+            (last ? blue : axis) + '" stroke-width="' + (last ? 1.8 : 1) + '"/>';
+          s += '<text x="' + (x + w / 2) + '" y="' + (r.y + 14) + '" text-anchor="middle" font-size="8" fill="' +
+            (last ? ink : muted) + '">tok</text>';
+        } else {
+          s += '<rect x="' + x + '" y="' + r.y + '" width="' + w + '" height="21" rx="5" fill="url(#ph)" opacity="0.6"/>';
+          s += '<text x="' + (x + w / 2) + '" y="' + (r.y + 14) + '" text-anchor="middle" font-size="8" fill="' + muted + '">pad</text>';
+        }
+        if (last) {
+          var cx = x + w / 2;
+          s += '<path d="M' + cx + " " + (r.y + 27) + " L" + cx + " " + (r.y + 38) + '" stroke="' + blue + '" stroke-width="1.6"/>';
+          s += '<text x="' + cx + '" y="' + (r.y + 49) + '" text-anchor="middle" font-size="8.5" font-weight="700" fill="' + blue + '">r = head(h)</text>';
+        }
+      }
+    });
+    document.getElementById("pool-svg").innerHTML = s;
+  }
+
+  /* ---- Bradley-Terry widget ---- */
+  var btD = document.getElementById("bt-d");
+  function sig(x) { return 1 / (1 + Math.exp(-x)); }
+  function drawBT() {
+    var d = parseFloat(btD.value);
+    document.getElementById("bt-d-val").textContent = d.toFixed(1);
+    var blue = cssv("--blue"), red = cssv("--red"), axis = cssv("--axis"),
+        grid = cssv("--grid"), muted = cssv("--muted"), ink = cssv("--ink");
+    var x0 = 30, x1 = 350, ybot = 118, ytop = 16;
+    function X(v) { return x0 + (v + 6) / 12 * (x1 - x0); }
+    function Y(p) { return ybot - p * (ybot - ytop); }
+    var s = "";
+    [0, 0.5, 1].forEach(function (p) {
+      s += '<line x1="' + x0 + '" y1="' + Y(p) + '" x2="' + x1 + '" y2="' + Y(p) + '" stroke="' + grid + '" stroke-width="1"/>';
+      s += '<text x="' + (x0 - 5) + '" y="' + (Y(p) + 3) + '" text-anchor="end" font-size="8.5" fill="' + muted + '">' + p.toFixed(1) + "</text>";
+    });
+    var pts = [];
+    for (var v = -6; v <= 6.001; v += 0.2) {
+      pts.push(X(v).toFixed(1) + "," + Y(sig(v)).toFixed(1));
+    }
+    s += '<polyline points="' + pts.join(" ") + '" fill="none" stroke="' + blue + '" stroke-width="2"/>';
+    s += '<line x1="' + X(d) + '" y1="' + ytop + '" x2="' + X(d) + '" y2="' + ybot + '" stroke="' + axis + '" stroke-width="1" />';
+    s += '<circle cx="' + X(d) + '" cy="' + Y(sig(d)) + '" r="5" fill="' + blue + '" stroke="' + cssv("--surface") + '" stroke-width="2"/>';
+    s += '<text x="' + X(0) + '" y="' + (ybot + 14) + '" text-anchor="middle" font-size="8.5" fill="' + muted + '">0</text>';
+    s += '<text x="' + x1 + '" y="' + (ybot + 14) + '" text-anchor="end" font-size="8.5" fill="' + muted + '">Δ = +6 (model agrees)</text>';
+    s += '<text x="' + x0 + '" y="' + (ybot + 14) + '" font-size="8.5" fill="' + muted + '">−6 (model disagrees)</text>';
+    s += '<text x="' + (x0 + 8) + '" y="' + (ytop + 18) + '" font-size="8.5" fill="' + muted + '">σ(Δ) = P(chosen preferred)</text>';
+    document.getElementById("bt-svg").innerHTML = s;
+    var loss = Math.log(1 + Math.exp(-d));
+    var gc = sig(d) - 1, gr = 1 - sig(d);
+    document.getElementById("bt-read").innerHTML =
+      "σ(Δ) = <b>" + sig(d).toFixed(3) + "</b> · loss = softplus(−Δ) = <b>" + loss.toFixed(3) + "</b>" +
+      " · ∂L/∂r<sub>c</sub> = <b style='color:" + blue + "'>" + gc.toFixed(3) + "</b>" +
+      " · ∂L/∂r<sub>r</sub> = <b style='color:" + red + "'>+" + gr.toFixed(3) + "</b>";
+  }
+  btD.addEventListener("input", drawBT);
+
+  /* ---- calibration histograms ---- */
+  function drawHist() {
+    var blue = cssv("--blue"), red = cssv("--red"), axis = cssv("--axis"), muted = cssv("--muted");
+    var x0 = 12, x1 = 348, ybot = 112, ytop = 14;
+    function X(v) { return x0 + (v + 3.5) / 7 * (x1 - x0); }
+    function curve(mu, sd) {
+      var pts = [];
+      for (var v = -3.5; v <= 3.501; v += 0.1) {
+        var p = Math.exp(-0.5 * Math.pow((v - mu) / sd, 2));
+        pts.push(X(v).toFixed(1) + "," + (ybot - p * (ybot - ytop)).toFixed(1));
+      }
+      return pts.join(" ");
+    }
+    var s = '<line x1="' + x0 + '" y1="' + ybot + '" x2="' + x1 + '" y2="' + ybot + '" stroke="' + axis + '" stroke-width="1"/>';
+    s += '<polyline points="' + curve(-0.35, 1.05) + '" fill="none" stroke="' + red + '" stroke-width="2"/>';
+    s += '<polyline points="' + curve(0.35, 1.0) + '" fill="none" stroke="' + blue + '" stroke-width="2"/>';
+    s += '<line x1="' + X(-0.35) + '" y1="' + ybot + '" x2="' + X(-0.35) + '" y2="' + (ybot + 5) + '" stroke="' + red + '" stroke-width="2"/>';
+    s += '<line x1="' + X(0.35) + '" y1="' + ybot + '" x2="' + X(0.35) + '" y2="' + (ybot + 5) + '" stroke="' + blue + '" stroke-width="2"/>';
+    s += '<text x="' + X(0) + '" y="' + (ybot + 16) + '" text-anchor="middle" font-size="8.5" fill="' + muted + '">mean gap ≈ 0.7 — that is the whole signal</text>';
+    document.getElementById("hist-svg").innerHTML = s;
+  }
+
+  function all() { drawPool(); drawBT(); drawHist(); }
+  all();
+  if (window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", all);
+  }
+})();
+</script>
+</body>
+</html>

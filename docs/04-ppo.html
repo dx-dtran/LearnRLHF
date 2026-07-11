@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PPO building blocks — LearnRLHF</title>
+<meta name="description" content="KL penalties, reward shaping, GAE, the clipped surrogate, value clipping, and entropy — the concepts behind Module 4.">
+<link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="topbar">
+  <a href="index.html">← All guides</a>
+  <span class="crumb">Module 4</span>
+</nav>
+
+<h1>PPO building blocks</h1>
+<p class="subtitle">Eight small functions. Each one has a picture, and each picture has a
+place where the gradient is zero on purpose.</p>
+
+<h2><span class="secno">1</span>The cast</h2>
+
+<p>From here on, four copies of GPT-2 are in play. Keep their roles straight — half of
+all PPO confusion is forgetting which model produced which number.</p>
+
+<div class="castrow">
+  <div class="cast"><b>Policy π</b>generates responses; the thing being trained
+    <span class="badge train">trainable</span></div>
+  <div class="cast"><b>Value head V</b>predicts reward-to-go from each token; shares the policy backbone
+    <span class="badge train">trainable</span></div>
+  <div class="cast"><b>Reference π<sub>ref</sub></b>frozen copy of SFT; the KL anchor
+    <span class="badge frozen">frozen</span></div>
+  <div class="cast"><b>Reward model</b>scores the finished response once
+    <span class="badge frozen">frozen</span></div>
+</div>
+
+<h2><span class="secno">2</span>Rollouts: the log-prob is one position to the left</h2>
+
+<p>During a rollout you must record, for every generated token, the log-probability the
+policy assigned it. The trap: the distribution that produced token
+<var>t</var> lives in the logits at position <var>t</var> − 1. Read the logits at the
+token's own position instead and you get the distribution for the <em>next</em> token —
+everything downstream still runs, and trains, wrong.</p>
+
+<figure class="viz">
+  <div class="seg" role="group" aria-label="alignment" id="ro-seg">
+    <button aria-pressed="true">correct</button>
+    <button aria-pressed="false">off-by-one bug</button>
+  </div>
+  <svg viewBox="0 0 360 140" id="ro-svg"></svg>
+  <p id="ro-read" style="font-size:0.86rem;color:var(--ink-2);margin:0.4rem 0 0"></p>
+  <figcaption>Each arrow reads: "this position's logits scored that token." Prompt
+  tokens need no score — only response tokens enter the PPO loss.</figcaption>
+</figure>
+
+<h2><span class="secno">3</span>The KL leash: k1 and k3</h2>
+
+<p>The reward model is a flawed judge, so the policy is kept on a leash: every token pays
+a penalty for drifting from the reference. The per-token quantity is an <em>estimate</em>
+of KL from a single sample, and there are two estimators you will implement:</p>
+
+<figure class="viz">
+  <div class="ctl">
+    <label>ratio at the sampled token, π / π<sub>ref</sub> = <span class="val" id="kl-r-val">1.00</span>
+      <input type="range" id="kl-r" min="-2" max="2" step="0.05" value="0"></label>
+  </div>
+  <svg viewBox="0 0 360 170" id="kl-svg"></svg>
+  <div class="readout" id="kl-read"></div>
+  <div class="legend">
+    <span><span class="key" style="background:var(--blue)"></span>k1 = log(π/π<sub>ref</sub>)</span>
+    <span><span class="key" style="background:var(--aqua)"></span>k3 = (π<sub>ref</sub>/π − 1) + log(π/π<sub>ref</sub>)</span>
+  </div>
+  <figcaption>k1 goes negative whenever the sampled token happens to be one the reference
+  likes <em>more</em> — individual samples swing both ways and only the average is the
+  KL. k3 is nonnegative for every single sample and hugs zero near ratio 1.</figcaption>
+</figure>
+
+<p>The division of labor: <strong>k1 goes in the reward</strong> (its gradient with
+respect to log π is exactly 1 — the cleanest possible penalty), and
+<strong>k3 goes in the logs</strong> (a per-batch KL readout that never confuses you with
+a negative value). InstructGPT penalizes with k1; so do you.</p>
+
+<h2><span class="secno">4</span>Reward shaping: one spike and a rent payment</h2>
+
+<p>The environment gives exactly one real reward, at the end — the RM score of the whole
+response. Every token before that only pays KL rent. This per-token reward vector is
+what GAE consumes next.</p>
+
+<figure class="viz">
+  <div class="ctl">
+    <label>KL coefficient β = <span class="val" id="rs-b-val">0.10</span>
+      <input type="range" id="rs-b" min="0" max="0.5" step="0.01" value="0.1"></label>
+  </div>
+  <svg viewBox="0 0 360 170" id="rs-svg"></svg>
+  <div class="readout" id="rs-read"></div>
+  <figcaption>Per-token reward <var>r<sub>t</sub></var> = −β · kl<sub>t</sub>, plus the
+  RM score added at the final response token. Slide β to 0 and only the terminal spike
+  survives — that limit is your unit test for problem 4.3.</figcaption>
+</figure>
+
+<h2><span class="secno">5</span>GAE: spreading the spike backwards</h2>
+
+<p>A single terminal reward is a terrible learning signal for token 3 of 200. The value
+head fixes that: it predicts, at every token, how the response will eventually score. GAE
+then builds per-token advantages from the chain of prediction errors
+δ<sub>t</sub> = <var>r<sub>t</sub></var> + γV<sub>t+1</sub> − V<sub>t</sub>, mixed over
+horizons by λ.</p>
+
+<figure class="viz">
+  <div class="ctl">
+    <label>γ (discount) = <span class="val" id="ga-g-val">1.00</span>
+      <input type="range" id="ga-g" min="0.5" max="1" step="0.01" value="1"></label>
+    <label>λ (horizon mix) = <span class="val" id="ga-l-val">0.95</span>
+      <input type="range" id="ga-l" min="0" max="1" step="0.01" value="0.95"></label>
+  </div>
+  <svg viewBox="0 0 360 220" id="ga-svg"></svg>
+  <div class="readout" id="ga-read"></div>
+  <figcaption>A 5-token episode with reward only at the end (2.0) and a value head that
+  partly saw it coming. At λ = 0, each advantage is just its own δ — the spike barely
+  reaches back. At λ = 1, γ = 1, every token gets the full "return minus my value"
+  Monte Carlo signal. λ = 0.95 buys low variance at a little bias.</figcaption>
+</figure>
+
+<div class="callout check">
+  <span class="tag">Derivation boundary — problem 4.4</span>
+  The recursion A<sub>t</sub> = δ<sub>t</sub> + γλ A<sub>t+1</sub> and why returns
+  R<sub>t</sub> = A<sub>t</sub> + V<sub>t</sub> are the value target belong on paper in
+  <code>notes/04-ppo-gae.md</code>, along with the 3-step hand example this widget is
+  secretly showing you.
+</div>
+
+<h2><span class="secno">6</span>The clipped surrogate</h2>
+
+<p>This is the loss PPO is named for. Each token's objective is the probability ratio
+against the rollout-time policy, times the advantage — but <em>clipped</em>: once the
+ratio has moved past 1 ± ε in the direction the advantage was pushing, the objective
+goes flat and the gradient switches off. The token has moved enough this round.</p>
+
+<figure class="viz">
+  <div class="ctl">
+    <div class="seg" role="group" aria-label="advantage sign" id="cl-seg">
+      <button aria-pressed="true">A = +1 (good token)</button>
+      <button aria-pressed="false">A = −1 (bad token)</button>
+    </div>
+    <label>clip ε = <span class="val" id="cl-e-val">0.20</span>
+      <input type="range" id="cl-e" min="0.05" max="0.5" step="0.01" value="0.2"></label>
+    <label>current ratio = <span class="val" id="cl-r-val">1.00</span>
+      <input type="range" id="cl-r" min="0" max="2.5" step="0.01" value="1"></label>
+  </div>
+  <svg viewBox="0 0 360 190" id="cl-svg"></svg>
+  <div class="readout" id="cl-read"></div>
+  <figcaption>The objective (higher is better) as a function of the ratio. The shaded
+  band is where the gradient is exactly zero. Note the asymmetry: the flat side only
+  exists in the direction the update <em>wants</em> to go — movement that makes things
+  worse is never protected by the clip.</figcaption>
+</figure>
+
+<p>Read the two cases off the picture: for a good token (A &gt; 0), the model stops
+being rewarded for pushing its probability up past 1 + ε, but if the ratio somehow fell,
+the gradient to recover is fully alive. For a bad token, symmetric: probability can be
+pushed down only so far per round. That one-sided flatness is the entire "trust region"
+— no constraint solver, just a <code>min</code>.</p>
+
+<div class="callout check">
+  <span class="tag">Grad-check note — problem 4.5</span>
+  Your test suite needs the edge case this plot makes obvious: construct a batch where
+  every ratio sits in the shaded region and assert the policy gradient is exactly zero.
+</div>
+
+<h2><span class="secno">7</span>Value clipping: the same idea, applied to V</h2>
+
+<p>The value head is retrained on the same rollout for K epochs, and early in training
+its targets are wild. The clipped value loss takes the <em>worse</em> of the normal
+squared error and a version where V may only move ε<sub>v</sub> from its rollout-time
+prediction:</p>
+
+<figure class="viz">
+  <div class="ctl">
+    <label>rollout-time value V<sub>old</sub> = <span class="val" id="vc-o-val">0.8</span>
+      <input type="range" id="vc-o" min="-1.2" max="1.2" step="0.05" value="0.8"></label>
+    <label>value clip ε<sub>v</sub> = <span class="val" id="vc-e-val">0.20</span>
+      <input type="range" id="vc-e" min="0.05" max="0.6" step="0.01" value="0.2"></label>
+  </div>
+  <svg viewBox="0 0 360 180" id="vc-svg"></svg>
+  <figcaption>Loss as a function of the new prediction V, with the target R fixed at 0.
+  When V<sub>old</sub> is far from the target, a plateau appears: the head cannot collect
+  any loss reduction for jumping straight to R — it may only close the gap ε<sub>v</sub>
+  per rollout phase. Slide V<sub>old</sub> onto the target and the plateau disappears.</figcaption>
+</figure>
+
+<h2><span class="secno">8</span>Entropy: the anti-collapse term</h2>
+
+<p>Everything above pushes probability mass toward whatever scored well. Left alone, the
+per-token distributions sharpen until sampling is deterministic — and exploration dies.
+The entropy bonus pays the model a little for staying spread out.</p>
+
+<figure class="viz">
+  <div class="ctl">
+    <label>distribution sharpness <span class="val" id="en-s-val">1.0</span>
+      <input type="range" id="en-s" min="0" max="4" step="0.05" value="1"></label>
+  </div>
+  <svg viewBox="0 0 360 150" id="en-svg"></svg>
+  <div class="readout" id="en-read"></div>
+  <figcaption>Entropy is maximal (log V nats) on the uniform distribution and falls to 0
+  at a spike. In training you mostly <em>watch</em> this number rather than boost it —
+  the config starts the coefficient at 0 and you raise it only if generations turn
+  repetitive and deterministic.</figcaption>
+</figure>
+
+<h2><span class="secno">9</span>The bug: normalizing over padding</h2>
+
+<p>Advantages get normalized per batch — subtract the mean, divide by the standard
+deviation — computed <strong>over valid response tokens only</strong>. Rollout buffers
+are padded rectangles, and whatever sits in the padding is garbage. Include it in the
+statistics and every real advantage in the batch is silently rescaled.</p>
+
+<figure class="viz">
+  <div class="seg" role="group" aria-label="stats mode" id="nm-seg">
+    <button aria-pressed="true">masked stats (correct)</button>
+    <button aria-pressed="false">include padding</button>
+  </div>
+  <div class="tokrow" id="nm-toks" style="line-height:2.6"></div>
+  <div class="readout" id="nm-read" style="min-height:3em"></div>
+  <figcaption>Two responses in one buffer; the second is short, and its padding slots
+  still hold stale values from a previous rollout. Toggle to see what those four garbage
+  numbers do to the mean and std that every real token is normalized by.</figcaption>
+</figure>
+
+<p>This is problem 4.8's unit test, and it is the single most common PPO implementation
+bug: pad half the batch with garbage, assert the statistics do not move.</p>
+
+<nav class="pager">
+  <a href="03-rm.html"><span class="dir">Previous</span>Reward model</a>
+  <a href="05-loop.html"><span class="dir">Next</span>The PPO loop</a>
+</nav>
+
+</div>
+<script>
+(function () {
+  function cssv(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+  function seg(el, fn) {
+    Array.prototype.forEach.call(el.children, function (b, i) {
+      b.addEventListener("click", function () {
+        Array.prototype.forEach.call(el.children, function (bb, j) {
+          bb.setAttribute("aria-pressed", j === i ? "true" : "false");
+        });
+        fn(i);
+      });
+    });
+  }
+
+  /* ---- 2. rollout alignment ---- */
+  var roBug = false;
+  var roToks = ["Tell", "me", "a", "joke", "Why", "did", "the", "…"];
+  var roPromptLen = 4;
+  seg(document.getElementById("ro-seg"), function (i) { roBug = i === 1; drawRO(); });
+  function drawRO() {
+    var blue = cssv("--blue"), red = cssv("--red"), axis = cssv("--axis"),
+        muted = cssv("--muted"), ink = cssv("--ink"), tint = cssv("--blue-tint");
+    var n = roToks.length, w = 36, gap = 8, x0 = 6, yTok = 18, yLog = 92, hh = 24;
+    var arrowColor = roBug ? red : blue;
+    var s = "";
+    for (var i = 0; i < n; i++) {
+      var x = x0 + i * (w + gap);
+      var isResp = i >= roPromptLen;
+      s += '<rect x="' + x + '" y="' + yTok + '" width="' + w + '" height="' + hh + '" rx="6" fill="' +
+        (isResp ? tint : "none") + '" stroke="' + (isResp ? blue : axis) + '" stroke-width="1.1"/>';
+      s += '<text x="' + (x + w / 2) + '" y="' + (yTok + 15.5) + '" text-anchor="middle" font-size="9" fill="' + ink + '">' + roToks[i] + "</text>";
+      s += '<circle cx="' + (x + w / 2) + '" cy="' + yLog + '" r="9" fill="none" stroke="' + axis + '" stroke-width="1.1"/>';
+      s += '<text x="' + (x + w / 2) + '" y="' + (yLog + 3) + '" text-anchor="middle" font-size="7.5" fill="' + muted + '">' + i + "</text>";
+    }
+    for (var t = roPromptLen; t < n; t++) {
+      var src = roBug ? t : t - 1;
+      var xs = x0 + src * (w + gap) + w / 2, xt = x0 + t * (w + gap) + w / 2;
+      var y1 = yLog - 10, y2 = yTok + hh + 3;
+      s += '<path d="M' + xs + " " + y1 + " C " + xs + " " + (y1 - 22) + ", " + xt + " " + (y2 + 22) + ", " + xt + " " + y2 +
+        '" fill="none" stroke="' + arrowColor + '" stroke-width="1.5"/>';
+      s += '<path d="M' + (xt - 3.5) + " " + (y2 + 6) + " L" + xt + " " + y2 + " L" + (xt + 3.5) + " " + (y2 + 6) +
+        '" fill="none" stroke="' + arrowColor + '" stroke-width="1.5"/>';
+    }
+    s += '<text x="6" y="128" font-size="9" fill="' + muted + '">circles: logits at each position · boxes: tokens (highlighted = response)</text>';
+    document.getElementById("ro-svg").innerHTML = s;
+    document.getElementById("ro-read").innerHTML = roBug
+      ? "<span style='color:var(--red)'><b>Bug:</b></span> each response token is scored by the logits at its <em>own</em> position — the distribution computed <em>after</em> the model already read it. Ratios start near garbage, not near 1."
+      : "<b>Correct:</b> token at position <var>t</var> is scored by the logits at position <var>t</var> − 1. On the very first optimize pass, every ratio is exactly 1 — that is your sanity check.";
+  }
+
+  /* ---- 3. KL widget ---- */
+  var klR = document.getElementById("kl-r");
+  function drawKL() {
+    var xlog = parseFloat(klR.value);
+    var r = Math.pow(2, xlog);
+    document.getElementById("kl-r-val").textContent = r.toFixed(2);
+    var blue = cssv("--blue"), aqua = cssv("--aqua"), axis = cssv("--axis"),
+        grid = cssv("--grid"), muted = cssv("--muted");
+    var x0 = 34, x1 = 350, ytop = 12, ybot = 140;
+    var ymin = -1.6, ymax = 1.9;
+    function X(v) { return x0 + (v + 2) / 4 * (x1 - x0); }
+    function Y(v) { return ybot - (v - ymin) / (ymax - ymin) * (ybot - ytop); }
+    function k1(rr) { return Math.log(rr); }
+    function k3(rr) { return (1 / rr - 1) + Math.log(rr); }
+    var s = "";
+    [-1, 0, 1].forEach(function (v) {
+      s += '<line x1="' + x0 + '" y1="' + Y(v) + '" x2="' + x1 + '" y2="' + Y(v) + '" stroke="' + grid + '" stroke-width="1"/>';
+      s += '<text x="' + (x0 - 4) + '" y="' + (Y(v) + 3) + '" text-anchor="end" font-size="8.5" fill="' + muted + '">' + v + "</text>";
+    });
+    [0.25, 0.5, 1, 2, 4].forEach(function (rv) {
+      var xx = X(Math.log2(rv));
+      s += '<text x="' + xx + '" y="' + (ybot + 13) + '" text-anchor="middle" font-size="8.5" fill="' + muted + '">' + rv + "</text>";
+    });
+    function curve(fn, color) {
+      var pts = [];
+      for (var v = -2; v <= 2.001; v += 0.05) {
+        pts.push(X(v).toFixed(1) + "," + Y(fn(Math.pow(2, v))).toFixed(1));
+      }
+      return '<polyline points="' + pts.join(" ") + '" fill="none" stroke="' + color + '" stroke-width="2"/>';
+    }
+    s += curve(k3, aqua) + curve(k1, blue);
+    s += '<line x1="' + X(xlog) + '" y1="' + ytop + '" x2="' + X(xlog) + '" y2="' + ybot + '" stroke="' + axis + '" stroke-width="1"/>';
+    s += '<circle cx="' + X(xlog) + '" cy="' + Y(k1(r)) + '" r="4.5" fill="' + blue + '" stroke="' + cssv("--surface") + '" stroke-width="2"/>';
+    s += '<circle cx="' + X(xlog) + '" cy="' + Y(k3(r)) + '" r="4.5" fill="' + aqua + '" stroke="' + cssv("--surface") + '" stroke-width="2"/>';
+    document.getElementById("kl-svg").innerHTML = s;
+    document.getElementById("kl-read").innerHTML =
+      "k1 = <b>" + k1(r).toFixed(3) + "</b> · k3 = <b>" + k3(r).toFixed(3) + "</b>" +
+      (k1(r) < 0 ? " · k1 sample is negative — fine, only the mean is the KL" : "");
+  }
+  klR.addEventListener("input", drawKL);
+
+  /* ---- 4. reward shaping ---- */
+  var rsToks = ["Why", "did", "the", "chicken", "cross", "?", "<|im_end|>"];
+  var rsKL = [0.4, 0.1, 0.05, 1.8, 0.3, 0.15, 0.6];
+  var rsRM = 1.2;
+  var rsB = document.getElementById("rs-b");
+  function drawRS() {
+    var b = parseFloat(rsB.value);
+    document.getElementById("rs-b-val").textContent = b.toFixed(2);
+    var blue = cssv("--blue"), red = cssv("--red"), axis = cssv("--axis"),
+        muted = cssv("--muted"), ink = cssv("--ink");
+    var n = rsToks.length, w = 360 / n, mid = 92, sc = 55;
+    var s = '<line x1="4" y1="' + mid + '" x2="356" y2="' + mid + '" stroke="' + axis + '" stroke-width="1"/>';
+    var total = 0;
+    for (var i = 0; i < n; i++) {
+      var rt = -b * rsKL[i] + (i === n - 1 ? rsRM : 0);
+      total += rt;
+      var cx = i * w + w / 2;
+      var h = rt * sc;
+      var top = h >= 0 ? mid - h : mid;
+      s += '<rect x="' + (cx - 14) + '" y="' + top + '" width="28" height="' + Math.max(1.5, Math.abs(h)) +
+        '" rx="3.5" fill="' + (rt >= 0 ? blue : red) + '"/>';
+      s += '<text x="' + cx + '" y="' + (h >= 0 ? top - 4 : top + Math.abs(h) + 11) + '" text-anchor="middle" font-size="8.5" fill="' + ink + '">' +
+        (rt >= 0 ? "+" : "") + rt.toFixed(2) + "</text>";
+      s += '<text x="' + cx + '" y="' + 158 + '" text-anchor="middle" font-size="7.5" fill="' + muted + '">' + rsToks[i] + "</text>";
+    }
+    s += '<text x="6" y="14" font-size="9" fill="' + muted + '">"chicken" surprised the reference — it pays the most rent</text>';
+    document.getElementById("rs-svg").innerHTML = s;
+    document.getElementById("rs-read").innerHTML =
+      "RM score at the end: <b>+" + rsRM.toFixed(2) + "</b> · total shaped reward: <b>" + total.toFixed(2) + "</b>";
+  }
+  rsB.addEventListener("input", drawRS);
+
+  /* ---- 5. GAE ---- */
+  var gaR = [0, 0, 0, 0, 2.0];
+  var gaV = [0.10, 0.25, 0.45, 0.70, 0.90];
+  var gaG = document.getElementById("ga-g"), gaL = document.getElementById("ga-l");
+  function drawGA() {
+    var g = parseFloat(gaG.value), l = parseFloat(gaL.value);
+    document.getElementById("ga-g-val").textContent = g.toFixed(2);
+    document.getElementById("ga-l-val").textContent = l.toFixed(2);
+    var T = gaR.length;
+    var delta = [], A = new Array(T);
+    for (var t = 0; t < T; t++) {
+      var vNext = t + 1 < T ? gaV[t + 1] : 0;
+      delta.push(gaR[t] + g * vNext - gaV[t]);
+    }
+    var acc = 0;
+    for (var t2 = T - 1; t2 >= 0; t2--) {
+      acc = delta[t2] + g * l * acc;
+      A[t2] = acc;
+    }
+    var blue = cssv("--blue"), violet = cssv("--violet"), axis = cssv("--axis"),
+        muted = cssv("--muted"), ink = cssv("--ink");
+    function row(vals, y0, sc, color, label, labelY) {
+      var s = '<line x1="30" y1="' + y0 + '" x2="356" y2="' + y0 + '" stroke="' + axis + '" stroke-width="1"/>';
+      s += '<text x="4" y="' + labelY + '" font-size="9" font-weight="700" fill="' + color + '">' + label + "</text>";
+      var w = 326 / T;
+      for (var i = 0; i < T; i++) {
+        var cx = 30 + i * w + w / 2;
+        var h = vals[i] * sc;
+        var top = h >= 0 ? y0 - h : y0;
+        s += '<rect x="' + (cx - 13) + '" y="' + top + '" width="26" height="' + Math.max(1.5, Math.abs(h)) + '" rx="3" fill="' + color + '"/>';
+        s += '<text x="' + cx + '" y="' + (h >= 0 ? top - 3 : top + Math.abs(h) + 10) + '" text-anchor="middle" font-size="8" fill="' + ink + '">' + vals[i].toFixed(2) + "</text>";
+      }
+      return s;
+    }
+    var s = row(delta, 86, 24, violet, "TD errors δ", 14);
+    s += row(A, 186, 24, blue, "advantages A — built backwards, A = δ + γλ · A(t+1)", 116);
+    var w2 = 326 / T;
+    for (var k = 0; k < T; k++) {
+      s += '<text x="' + (30 + k * w2 + w2 / 2) + '" y="214" text-anchor="middle" font-size="8" fill="' + muted + '">t=' + k + "</text>";
+    }
+    document.getElementById("ga-svg").innerHTML = s;
+    var note = l < 0.05 ? "λ ≈ 0: advantage = own δ only; the terminal surprise never reaches early tokens"
+      : (l > 0.97 && g > 0.99 ? "λ = 1, γ = 1: A_t = total return − V_t (Monte Carlo)" :
+        "each δ leaks backwards, attenuated by γλ per step");
+    document.getElementById("ga-read").innerHTML =
+      "A₀ = <b>" + A[0].toFixed(2) + "</b> · " + note;
+  }
+  gaG.addEventListener("input", drawGA);
+  gaL.addEventListener("input", drawGA);
+
+  /* ---- 6. clipped surrogate ---- */
+  var clA = 1;
+  var clE = document.getElementById("cl-e"), clRr = document.getElementById("cl-r");
+  seg(document.getElementById("cl-seg"), function (i) { clA = i === 0 ? 1 : -1; drawCL(); });
+  function drawCL() {
+    var e = parseFloat(clE.value), rcur = parseFloat(clRr.value);
+    document.getElementById("cl-e-val").textContent = e.toFixed(2);
+    document.getElementById("cl-r-val").textContent = rcur.toFixed(2);
+    var A = clA;
+    function obj(r) {
+      var c = Math.min(Math.max(r, 1 - e), 1 + e);
+      return Math.min(r * A, c * A);
+    }
+    var blue = cssv("--blue"), red = cssv("--red"), axis = cssv("--axis"),
+        grid = cssv("--grid"), muted = cssv("--muted"), rt = cssv("--red-tint");
+    var x0 = 34, x1 = 350, ytop = 12, ybot = 158;
+    var ymin = -2.6, ymax = 1.5;
+    function X(v) { return x0 + v / 2.5 * (x1 - x0); }
+    function Y(v) { return ybot - (v - ymin) / (ymax - ymin) * (ybot - ytop); }
+    var s = "";
+    /* zero-gradient shading */
+    if (A > 0) {
+      s += '<rect x="' + X(1 + e) + '" y="' + ytop + '" width="' + (x1 - X(1 + e)) + '" height="' + (ybot - ytop) + '" fill="' + rt + '"/>';
+    } else {
+      s += '<rect x="' + x0 + '" y="' + ytop + '" width="' + (X(1 - e) - x0) + '" height="' + (ybot - ytop) + '" fill="' + rt + '"/>';
+    }
+    [-2, -1, 0, 1].forEach(function (v) {
+      s += '<line x1="' + x0 + '" y1="' + Y(v) + '" x2="' + x1 + '" y2="' + Y(v) + '" stroke="' + grid + '" stroke-width="1"/>';
+      s += '<text x="' + (x0 - 4) + '" y="' + (Y(v) + 3) + '" text-anchor="end" font-size="8.5" fill="' + muted + '">' + v + "</text>";
+    });
+    [0, 0.5, 1, 1.5, 2, 2.5].forEach(function (v) {
+      s += '<text x="' + X(v) + '" y="' + (ybot + 13) + '" text-anchor="middle" font-size="8.5" fill="' + muted + '">' + v + "</text>";
+    });
+    /* 1-e, 1+e markers */
+    [1 - e, 1 + e].forEach(function (v) {
+      s += '<line x1="' + X(v) + '" y1="' + ytop + '" x2="' + X(v) + '" y2="' + ybot + '" stroke="' + axis + '" stroke-width="1"/>';
+    });
+    s += '<text x="' + X(1 - e) + '" y="' + (ytop - 1) + '" text-anchor="middle" font-size="8" fill="' + muted + '">1−ε</text>';
+    s += '<text x="' + X(1 + e) + '" y="' + (ytop - 1) + '" text-anchor="middle" font-size="8" fill="' + muted + '">1+ε</text>';
+    var pts = [];
+    for (var v = 0; v <= 2.501; v += 0.02) {
+      pts.push(X(v).toFixed(1) + "," + Y(obj(v)).toFixed(1));
+    }
+    s += '<polyline points="' + pts.join(" ") + '" fill="none" stroke="' + blue + '" stroke-width="2"/>';
+    s += '<circle cx="' + X(rcur) + '" cy="' + Y(obj(rcur)) + '" r="5" fill="' + blue + '" stroke="' + cssv("--surface") + '" stroke-width="2"/>';
+    document.getElementById("cl-svg").innerHTML = s;
+    var clippedNow = (A > 0 && rcur > 1 + e) || (A < 0 && rcur < 1 - e);
+    var grad = clippedNow ? 0 : A * rcur;
+    document.getElementById("cl-read").innerHTML =
+      "objective = <b>" + obj(rcur).toFixed(2) + "</b> · gradient wrt log π = <b>" +
+      (clippedNow ? "0 — clipped, this token sits out the rest of the K epochs" : grad.toFixed(2)) + "</b>";
+  }
+  clE.addEventListener("input", drawCL);
+  clRr.addEventListener("input", drawCL);
+
+  /* ---- 7. value clip ---- */
+  var vcO = document.getElementById("vc-o"), vcE = document.getElementById("vc-e");
+  function drawVC() {
+    var vo = parseFloat(vcO.value), e = parseFloat(vcE.value), R = 0;
+    document.getElementById("vc-o-val").textContent = vo.toFixed(2);
+    document.getElementById("vc-e-val").textContent = e.toFixed(2);
+    function lossU(v) { return 0.5 * (v - R) * (v - R); }
+    function lossC(v) {
+      var cv = Math.min(Math.max(v, vo - e), vo + e);
+      return Math.max(lossU(v), 0.5 * (cv - R) * (cv - R));
+    }
+    var blue = cssv("--blue"), muted = cssv("--muted"), grid = cssv("--grid"),
+        axis = cssv("--axis"), ink = cssv("--ink");
+    var x0 = 34, x1 = 350, ytop = 12, ybot = 148, vmin = -1.5, vmax = 1.5, lmax = 1.15;
+    function X(v) { return x0 + (v - vmin) / (vmax - vmin) * (x1 - x0); }
+    function Y(v) { return ybot - Math.min(v, lmax) / lmax * (ybot - ytop); }
+    var s = "";
+    [0, 0.5, 1].forEach(function (v) {
+      s += '<line x1="' + x0 + '" y1="' + Y(v) + '" x2="' + x1 + '" y2="' + Y(v) + '" stroke="' + grid + '" stroke-width="1"/>';
+      s += '<text x="' + (x0 - 4) + '" y="' + (Y(v) + 3) + '" text-anchor="end" font-size="8.5" fill="' + muted + '">' + v.toFixed(1) + "</text>";
+    });
+    function curve(fn, color, wd) {
+      var pts = [];
+      for (var v = vmin; v <= vmax + 0.001; v += 0.02) {
+        pts.push(X(v).toFixed(1) + "," + Y(fn(v)).toFixed(1));
+      }
+      return '<polyline points="' + pts.join(" ") + '" fill="none" stroke="' + color + '" stroke-width="' + wd + '"/>';
+    }
+    s += curve(lossU, axis, 1.4);
+    s += curve(lossC, blue, 2.2);
+    s += '<line x1="' + X(R) + '" y1="' + ybot + '" x2="' + X(R) + '" y2="' + (ybot + 5) + '" stroke="' + ink + '" stroke-width="2"/>';
+    s += '<text x="' + X(R) + '" y="' + (ybot + 15) + '" text-anchor="middle" font-size="8.5" fill="' + muted + '">target R</text>';
+    s += '<line x1="' + X(vo) + '" y1="' + ybot + '" x2="' + X(vo) + '" y2="' + (ybot + 5) + '" stroke="' + blue + '" stroke-width="2"/>';
+    s += '<text x="' + X(vo) + '" y="' + (ybot + 15) + '" text-anchor="middle" font-size="8.5" fill="' + blue + '">V_old</text>';
+    s += '<text x="' + (x0 + 4) + '" y="' + (ytop + 6) + '" font-size="8.5" fill="' + muted + '">thin: plain ½(V−R)² · thick: clipped max — note the plateau</text>';
+    document.getElementById("vc-svg").innerHTML = s;
+  }
+  vcO.addEventListener("input", drawVC);
+  vcE.addEventListener("input", drawVC);
+
+  /* ---- 8. entropy ---- */
+  var enBase = [1.5, 0.9, 0.4, 0.0, -0.5, -1.0];
+  var enS = document.getElementById("en-s");
+  function drawEN() {
+    var sh = parseFloat(enS.value);
+    document.getElementById("en-s-val").textContent = sh.toFixed(2);
+    var ex = enBase.map(function (l) { return Math.exp(sh * l); });
+    var Z = ex.reduce(function (a, v) { return a + v; }, 0);
+    var p = ex.map(function (v) { return v / Z; });
+    var H = 0;
+    p.forEach(function (v) { if (v > 0) H -= v * Math.log(v); });
+    var blue = cssv("--blue"), axis = cssv("--axis"), muted = cssv("--muted");
+    var base = 118, hmax = 100, n = p.length, w = 360 / n;
+    var s = '<line x1="4" y1="' + base + '" x2="356" y2="' + base + '" stroke="' + axis + '" stroke-width="1"/>';
+    for (var i = 0; i < n; i++) {
+      var cx = i * w + w / 2;
+      var h = Math.max(1.5, p[i] * hmax);
+      s += '<rect x="' + (cx - 16) + '" y="' + (base - h) + '" width="32" height="' + h + '" rx="4" fill="' + blue + '"/>';
+      s += '<text x="' + cx + '" y="' + (base + 13) + '" text-anchor="middle" font-size="8.5" fill="' + muted + '">tok ' + (i + 1) + "</text>";
+    }
+    document.getElementById("en-svg").innerHTML = s;
+    document.getElementById("en-read").innerHTML =
+      "H = <b>" + H.toFixed(2) + " nats</b> (max here: " + Math.log(enBase.length).toFixed(2) + ")" +
+      (H < 0.3 ? " · <span style='color:var(--red)'>near-deterministic — in a real run this is mode collapse</span>" : "");
+  }
+  enS.addEventListener("input", drawEN);
+
+  /* ---- 9. masked normalization ---- */
+  var nmVals = [
+    { v: 0.5, pad: false }, { v: -0.2, pad: false }, { v: 1.1, pad: false },
+    { v: 0.3, pad: false }, { v: -0.8, pad: false }, { v: 0.9, pad: false },
+    { v: 0.4, pad: false }, { v: -0.5, pad: false },
+    { v: 12.0, pad: true }, { v: -7.0, pad: true }, { v: 3.0, pad: true }, { v: 5.0, pad: true }
+  ];
+  var nmBad = false;
+  seg(document.getElementById("nm-seg"), function (i) { nmBad = i === 1; drawNM(); });
+  function drawNM() {
+    var row = document.getElementById("nm-toks");
+    row.innerHTML = "";
+    nmVals.forEach(function (t) {
+      var el = document.createElement("span");
+      el.className = "tok" + (t.pad ? " ghost" : " on");
+      el.textContent = (t.pad ? "pad:" : "") + t.v.toFixed(1);
+      row.appendChild(el);
+    });
+    var use = nmVals.filter(function (t) { return nmBad || !t.pad; }).map(function (t) { return t.v; });
+    var m = use.reduce(function (a, v) { return a + v; }, 0) / use.length;
+    var sd = Math.sqrt(use.reduce(function (a, v) { return a + (v - m) * (v - m); }, 0) / use.length);
+    var a1 = (1.1 - m) / sd, a2 = (-0.8 - m) / sd;
+    document.getElementById("nm-read").innerHTML =
+      "mean = <b>" + m.toFixed(2) + "</b> · std = <b>" + sd.toFixed(2) + "</b><br>" +
+      "real token with A = 1.1 normalizes to <b>" + a1.toFixed(2) + "</b> · A = −0.8 normalizes to <b>" + a2.toFixed(2) + "</b>" +
+      (nmBad ? " — <span style='color:var(--red)'>a strong positive advantage just became weak, and a clearly bad token now looks average</span>" : "");
+  }
+
+  function all() { drawRO(); drawKL(); drawRS(); drawGA(); drawCL(); drawVC(); drawEN(); drawNM(); }
+  all();
+  if (window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", all);
+  }
+})();
+</script>
+</body>
+</html>

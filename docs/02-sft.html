@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SFT and the loss mask — LearnRLHF</title>
+<meta name="description" content="Behavior cloning, the shift-by-one, and prompt masking — the concepts behind Module 2.">
+<link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="topbar">
+  <a href="index.html">← All guides</a>
+  <span class="crumb">Module 2</span>
+</nav>
+
+<h1>SFT and the loss mask</h1>
+<p class="subtitle">One loss, one mask, one off-by-one. All three have to be right.</p>
+
+<h2><span class="secno">1</span>SFT is behavior cloning</h2>
+
+<p>Supervised finetuning is exactly pretraining's loss on different data: predict the
+next token, everywhere. What changes is <em>which</em> next-tokens you charge the model
+for. The dialogues contain two voices — the human's turns and the assistant's — and you
+only want to clone one of them. Train on the human's tokens too and you teach the model
+to <em>continue asking questions</em>, which is precisely the failure mode SFT exists to
+remove. This is the bug in the old repo, and problem 2.1 is where you fix it.</p>
+
+<h2><span class="secno">2</span>The mask, on real tokens</h2>
+
+<figure class="viz">
+  <div class="seg" role="group" aria-label="masking mode" id="mk-seg">
+    <button aria-pressed="true">correct mask</button>
+    <button aria-pressed="false">old-repo bug</button>
+  </div>
+  <div class="tokrow" id="mk-toks"></div>
+  <div class="legend">
+    <span><span class="key" style="background:var(--blue-tint);border:1px solid var(--blue)"></span>mask = 1, in the loss</span>
+    <span><span class="key" style="background:var(--plane);border:1px solid var(--border)"></span>mask = 0, context only</span>
+  </div>
+  <p id="mk-read" style="font-size:0.86rem;color:var(--ink-2);min-height:3.2em;margin:0.6rem 0 0"></p>
+  <figcaption>Tap any token. Highlighted tokens are the ones whose log-probability enters
+  the loss: assistant content plus its closing <code>&lt;|im_end|&gt;</code>. Everything
+  else — user text, role headers, the assistant's own scaffolding — is context the model
+  conditions on but is never trained to produce.</figcaption>
+</figure>
+
+<p>Why does the assistant's <code>&lt;|im_end|&gt;</code> carry mask 1? Because
+<em>stopping</em> is a behavior. If the model is never trained to emit the end tag, it
+never learns to finish a reply — you will meet this again in PPO, where a rollout that
+never terminates eats your whole token budget.</p>
+
+<h2><span class="secno">3</span>The shift by one</h2>
+
+<p>Logits at position <var>t</var> are a prediction of the token at position
+<var>t</var>+1. So <code>labels</code> is <code>input_ids</code> shifted left, and the
+mask must ride along with the <em>label</em>, not the input position. Get this wrong and
+the loss still goes down — you are just training every prediction against the wrong
+target, one token late. The unit test in 2.3 that hand-checks mask positions on a tiny
+example is what catches it.</p>
+
+<h2><span class="secno">4</span>The gradient you should recognize on sight</h2>
+
+<p>For one position, cross-entropy through a softmax has the cleanest gradient in deep
+learning: <b>∂L/∂logits = p − onehot(target)</b>. The model's current belief, minus
+where the probability should have gone.</p>
+
+<figure class="viz">
+  <p style="margin:0 0 0.3rem;font-size:0.85rem;color:var(--ink-2)">
+    Model's distribution for the next token — tap the true target:</p>
+  <div class="tokrow" id="gr-toks"></div>
+  <svg viewBox="0 0 360 212" id="gr-svg"></svg>
+  <div class="legend">
+    <span><span class="key" style="background:var(--blue)"></span>probability <var>p</var></span>
+    <span><span class="key" style="background:var(--red)"></span>gradient <var>p</var> − onehot</span>
+  </div>
+  <figcaption>Every wrong token gets a positive gradient of exactly its own probability
+  (push its logit down in proportion to how much the model believed it); the target gets
+  <var>p</var> − 1 (push up, hardest when the model was most surprised). The bars always
+  sum to zero — softmax only moves probability around.</figcaption>
+</figure>
+
+<p>The masked SFT loss is this picture times <code>mask</code>, summed, divided by the
+<em>number of masked-in tokens</em> — not by sequence length. Divide by <var>T</var> and
+your effective learning rate silently depends on how chatty the human was.</p>
+
+<div class="callout check">
+  <span class="tag">Grad-check note — problem 2.2</span>
+  Two tests, not one: the centered-difference check on the gradient, and the mask test —
+  change a masked-out token's logits and assert the loss does not move at all. The second
+  is the one that would have caught the old repo's bug.
+</div>
+
+<h2><span class="secno">5</span>What success looks like</h2>
+
+<p>After two epochs, eval loss stops being the interesting metric. Generate side by side
+(problem 2.5): the base model answers a question with more questions or drifts into web
+boilerplate; the SFT model stays in the assistant role, answers, and stops. It will still
+be confidently wrong and occasionally unhelpful — SFT can only imitate the demonstrations
+it saw. Making it <em>prefer</em> better answers is what the next two modules are for.</p>
+
+<nav class="pager">
+  <a href="01-gpt2.html"><span class="dir">Previous</span>GPT-2 anatomy</a>
+  <a href="03-rm.html"><span class="dir">Next</span>Reward model</a>
+</nav>
+
+</div>
+<script>
+(function () {
+  function cssv(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+
+  /* ---- mask widget ---- */
+  /* tokens: [text, kind] kind: scaffold | user | assistant */
+  var toks = [
+    ["<|im_start|>", "s"], ["user", "s"], ["What", "u"], ["is", "u"], ["the", "u"],
+    ["capital", "u"], ["of", "u"], ["France", "u"], ["?", "u"], ["<|im_end|>", "s"],
+    ["<|im_start|>", "s"], ["assistant", "s"], ["Paris", "a"], [".", "a"], ["<|im_end|>", "ae"]
+  ];
+  var buggy = false, sel = 12;
+  var row = document.getElementById("mk-toks");
+  var seg = document.getElementById("mk-seg");
+  var read = document.getElementById("mk-read");
+  toks.forEach(function (t, i) {
+    var el = document.createElement("span");
+    el.className = "tok";
+    el.textContent = t[0];
+    el.addEventListener("click", function () { sel = i; drawMask(); });
+    row.appendChild(el);
+  });
+  Array.prototype.forEach.call(seg.children, function (b, i) {
+    b.addEventListener("click", function () { buggy = i === 1; drawMask(); });
+  });
+  function maskOf(i) {
+    if (buggy) return 1;
+    var k = toks[i][1];
+    return (k === "a" || k === "ae") ? 1 : 0;
+  }
+  function drawMask() {
+    Array.prototype.forEach.call(seg.children, function (b, i) {
+      b.setAttribute("aria-pressed", (i === 1) === buggy ? "true" : "false");
+    });
+    Array.prototype.forEach.call(row.children, function (el, i) {
+      el.className = "tok" + (maskOf(i) ? " on" : "") + (i === sel ? " sel" : "");
+    });
+    var t = toks[sel], m = maskOf(sel);
+    var msg;
+    if (m) {
+      msg = "<b>" + t[0] + "</b> — mask 1. The logits one position earlier must assign " +
+        "this token high probability; its log-prob is charged to the loss.";
+      if (buggy && t[1] !== "a" && t[1] !== "ae") {
+        msg += " <span style='color:var(--red)'>But this is a " +
+          (t[1] === "u" ? "user token" : "scaffold token") +
+          " — you are now training the model to write the human's side of the conversation.</span>";
+      }
+      if (t[1] === "ae") msg += " Stopping is a trained behavior: this is where the model learns to end a reply.";
+    } else {
+      msg = "<b>" + t[0] + "</b> — mask 0. The model still reads it as context (attention sees everything), " +
+        "but no gradient asks the model to reproduce it.";
+    }
+    read.innerHTML = msg;
+  }
+
+  /* ---- gradient widget ---- */
+  var grToks = ["Paris", "London", "France", "the", ","];
+  var grLogits = [2.0, 1.2, 0.8, 0.3, -0.2];
+  var target = 0;
+  var grow = document.getElementById("gr-toks");
+  grToks.forEach(function (t, i) {
+    var el = document.createElement("span");
+    el.className = "tok";
+    el.textContent = t;
+    el.addEventListener("click", function () { target = i; drawGrad(); });
+    grow.appendChild(el);
+  });
+  function drawGrad() {
+    Array.prototype.forEach.call(grow.children, function (el, i) {
+      el.className = "tok" + (i === target ? " sel on" : "");
+    });
+    var ex = grLogits.map(Math.exp);
+    var Z = ex.reduce(function (a, v) { return a + v; }, 0);
+    var p = ex.map(function (v) { return v / Z; });
+    var g = p.map(function (v, i) { return v - (i === target ? 1 : 0); });
+    var blue = cssv("--blue"), red = cssv("--red"), axis = cssv("--axis"),
+        muted = cssv("--muted"), ink = cssv("--ink");
+    var mid = 100, sc = 88, n = p.length, w = 360 / n;
+    var s = '<line x1="4" y1="' + mid + '" x2="356" y2="' + mid + '" stroke="' + axis + '" stroke-width="1"/>';
+    for (var i = 0; i < n; i++) {
+      var cx = i * w + w / 2;
+      var hp = p[i] * sc;
+      s += '<rect x="' + (cx - 15) + '" y="' + (mid - hp) + '" width="13" height="' + Math.max(1.5, hp) + '" rx="3" fill="' + blue + '"/>';
+      var hg = g[i] * sc;
+      var top = hg >= 0 ? mid - hg : mid;
+      s += '<rect x="' + (cx + 2) + '" y="' + top + '" width="13" height="' + Math.max(1.5, Math.abs(hg)) + '" rx="3" fill="' + red + '"/>';
+      s += '<text x="' + cx + '" y="205" text-anchor="middle" font-size="9" fill="' + muted + '">' + grToks[i] + "</text>";
+      s += '<text x="' + (cx + 8.5) + '" y="' + (hg >= 0 ? mid - hg - 4 : top + Math.abs(hg) + 11) + '" text-anchor="middle" font-size="8.5" fill="' + ink + '">' +
+        (g[i] >= 0 ? "+" : "") + g[i].toFixed(2) + "</text>";
+    }
+    s += '<text x="6" y="14" font-size="9" fill="' + muted + '">above zero: logit pushed down · below zero: logit pushed up</text>';
+    document.getElementById("gr-svg").innerHTML = s;
+  }
+
+  function all() { drawMask(); drawGrad(); }
+  all();
+  if (window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", all);
+  }
+})();
+</script>
+</body>
+</html>

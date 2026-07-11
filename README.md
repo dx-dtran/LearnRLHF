@@ -10,6 +10,10 @@ visibly better at instruction following than the raw pretrained checkpoint.
 Style: Karpathy `nanoGPT` + CS231n assignments. Flat `.py` files, minimal abstractions,
 aggressive gradient checking, prose-heavy docstrings.
 
+Interactive visual guides for each module live in [`docs/`](docs/index.html) — plain
+HTML, phone-friendly, deployable with GitHub Pages (Settings → Pages → deploy from
+branch, `/docs` folder). They cover the concepts; derivations stay in `notes/`.
+
 ---
 
 ## 1. Setup

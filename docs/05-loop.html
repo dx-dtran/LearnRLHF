@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The PPO loop — LearnRLHF</title>
+<meta name="description" content="The rollout-optimize rhythm, four models on one GPU, and reading the training dashboard — the concepts behind Modules 5 and 6.">
+<link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<div class="wrap">
+
+<nav class="topbar">
+  <a href="index.html">← All guides</a>
+  <span class="crumb">Modules 5–6</span>
+</nav>
+
+<h1>The PPO loop</h1>
+<p class="subtitle">All eight building blocks, snapped together into a rhythm.</p>
+
+<h2><span class="secno">1</span>The rhythm: collect, then squeeze</h2>
+
+<p>PPO alternates two phases. A <strong>rollout phase</strong> where the policy writes
+responses and everything about them is measured and frozen into buffers. Then an
+<strong>optimize phase</strong> where those buffers are replayed for K = 4 epochs of
+minibatch gradient steps. Then the buffers are thrown away, because the policy that
+generated them no longer exists.</p>
+
+<figure class="viz">
+  <div class="ctl" style="justify-content:space-between">
+    <button class="step" id="lp-prev">← back</button>
+    <span id="lp-count" style="font-size:0.82rem;color:var(--muted);font-variant-numeric:tabular-nums"></span>
+    <button class="step" id="lp-next">next →</button>
+  </div>
+  <div class="castrow" id="lp-cast"></div>
+  <p id="lp-title" style="margin:0.6rem 0 0.1rem;font-weight:650"></p>
+  <p id="lp-desc" style="font-size:0.88rem;color:var(--ink-2);margin:0.1rem 0 0.4rem;min-height:4.4em"></p>
+  <figcaption>Step through one full iteration. Dimmed models are idle; only the
+  highlighted ones run, and only the optimize step computes gradients.</figcaption>
+</figure>
+
+<p>Why not just take one big gradient step per rollout? Because rollouts are expensive —
+generation dominates wall-clock time — and one step wastes the data. Why not fifty
+epochs? Because after each step the live policy drifts from the one that produced the
+buffers; the ratios drift from 1, more tokens hit the clip, and the surrogate stops
+being a trustworthy stand-in for the true objective. K = 4 is the negotiated truce, and
+the <em>clip fraction</em> in your logs is where you watch the truce hold.</p>
+
+<h2><span class="secno">2</span>Four models, 24 GB</h2>
+
+<p>The memory bill is dominated not by weights but by the optimizer and activations —
+and only the trainable models pay those costs. That asymmetry is why four GPT-2s fit at
+all.</p>
+
+<figure class="viz">
+  <div class="seg" role="group" aria-label="model size" id="mm-seg">
+    <button aria-pressed="true">gpt2-small (124M)</button>
+    <button aria-pressed="false">gpt2-medium (355M)</button>
+  </div>
+  <svg viewBox="0 0 360 162" id="mm-svg"></svg>
+  <div class="readout" id="mm-read"></div>
+  <figcaption>Estimated peak usage against the 24 GB budget. Frozen models cost only
+  their bf16 weights; the policy drags fp32 master weights, Adam moments, gradients, and
+  checkpointed activations behind it. Problem 5.1 verifies these numbers with
+  <code>torch.cuda.max_memory_allocated</code>.</figcaption>
+</figure>
+
+<p>The design choices that make the budget work: the value head <strong>shares the
+policy backbone</strong> (one trainable transformer, not two), activations are
+<strong>gradient-checkpointed</strong> (recompute instead of store), and the frozen pair
+never builds a graph — every reference and RM forward runs under
+<code>torch.no_grad()</code>.</p>
+
+<h2><span class="secno">3</span>Reading the dashboard</h2>
+
+<p>PPO does not fail loudly. The loss goes down either way; generation quality is the
+thing being destroyed. You catch it in the metrics, and the two stories look like this:</p>
+
+<figure class="viz">
+  <div class="seg" role="group" aria-label="scenario" id="dx-seg">
+    <button aria-pressed="true">healthy run</button>
+    <button aria-pressed="false">reward hacking</button>
+  </div>
+  <div id="dx-charts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0.6rem;margin-top:0.5rem"></div>
+  <p id="dx-note" style="font-size:0.86rem;color:var(--ink-2);min-height:3.2em;margin:0.6rem 0 0"></p>
+  <figcaption>Sixty PPO iterations, three metrics. The same reward curve can mean two
+  different things — the KL and entropy panels are what disambiguate it.</figcaption>
+</figure>
+
+<p>The healthy pattern: reward climbs and flattens, KL drifts up <em>slowly</em> toward
+its budget (~6 nats over a 256-token response), entropy eases down. The pathology:
+reward keeps climbing while KL goes vertical and entropy collapses — the policy found a
+phrase or format the RM overpays for and is spamming it. The fix is never "train more":
+raise β, lower the learning rate, and check what the RM is actually rewarding.</p>
+
+<div class="callout gotcha">
+  <span class="tag">Why the leash exists</span>
+  The reward model is only trustworthy near the distribution it was trained on — SFT-like
+  text. The KL penalty is what keeps the policy inside that trust region. An exploding KL
+  means you are now optimizing the RM's <em>errors</em>, not its judgment.
+</div>
+
+<h2><span class="secno">4</span>Did it actually work? (Module 6)</h2>
+
+<p>The final judgment is embarrassingly manual, and that is deliberate. Generate 20
+held-out prompts through base, SFT, and RLHF side by side. Then self-annotate SFT-vs-RLHF
+pairs <em>blinded</em> — shuffle which column is which before reading, because knowing
+which model produced a response reliably biases you toward it. Target: RLHF wins at
+least 55%. Not 90 — with GPT-2 small, a 124M-parameter model, "visibly better at
+following instructions" is the honest ceiling.</p>
+
+<p>If RLHF loses the blind test, the ablation order is: lower β (the leash may be too
+tight to learn anything), more PPO iterations, then a longer-trained RM. And reread the
+dashboard first — a run that reward-hacked will lose the win-rate no matter what you
+ablate.</p>
+
+<nav class="pager">
+  <a href="04-ppo.html"><span class="dir">Previous</span>PPO building blocks</a>
+  <a href="index.html"><span class="dir">Up</span>All guides</a>
+</nav>
+
+</div>
+<script>
+(function () {
+  function cssv(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+  function seg(el, fn) {
+    Array.prototype.forEach.call(el.children, function (b, i) {
+      b.addEventListener("click", function () {
+        Array.prototype.forEach.call(el.children, function (bb, j) {
+          bb.setAttribute("aria-pressed", j === i ? "true" : "false");
+        });
+        fn(i);
+      });
+    });
+  }
+
+  /* ---- 1. loop stepper ---- */
+  var cast = [
+    { name: "Policy π", badge: "trainable" },
+    { name: "Value head", badge: "trainable" },
+    { name: "Reference", badge: "frozen" },
+    { name: "Reward model", badge: "frozen" }
+  ];
+  var steps = [
+    { t: "1 · Sample prompts", active: [], grad: false,
+      d: "Draw a batch of 64 prompts from the prompt-only dataset. No models run yet. Everything that follows happens once per outer iteration." },
+    { t: "2 · Rollout", active: [0, 1], grad: false,
+      d: "The policy generates up to 256 tokens per prompt, sampling at temperature 1. For every generated token, record the token id, its log-probability logπ_old, and the value head's prediction V_old. All of it under no_grad — these numbers are about to become frozen 'old' quantities." },
+    { t: "3 · Score", active: [2, 3], grad: false,
+      d: "One forward pass of the reference gives per-token KL rent (k1). One forward pass of the reward model gives the terminal score at the response's end tag. Together: the shaped per-token reward from guide 4, section 4." },
+    { t: "4 · GAE", active: [1], grad: false,
+      d: "Pure tensor arithmetic over the buffers: TD errors from rewards and values, the backward γλ recursion for advantages, returns = advantages + values as the value target. Then normalize advantages over valid tokens only." },
+    { t: "5 · Optimize, K = 4 epochs", active: [0, 1], grad: true,
+      d: "Replay the buffers in minibatches of 16. Each minibatch: recompute logπ and V fresh with gradients on, form ratios against the frozen logπ_old, and take a step on L_policy + c_v·L_value − c_ent·H, clipped to grad-norm 1. The clip retires tokens that have moved enough." },
+    { t: "6 · Discard and repeat", active: [], grad: false,
+      d: "The weights moved, so the buffers now describe a policy that no longer exists. Throw them away and roll out again. PPO's data is perishable — that is the price of being on-policy." }
+  ];
+  var cur = 0;
+  var castRow = document.getElementById("lp-cast");
+  cast.forEach(function (c) {
+    var el = document.createElement("div");
+    el.className = "cast";
+    el.innerHTML = "<b>" + c.name + "</b><span class='badge " +
+      (c.badge === "frozen" ? "frozen" : "train") + "'>" + c.badge + "</span>";
+    castRow.appendChild(el);
+  });
+  function drawLoop() {
+    var st = steps[cur];
+    Array.prototype.forEach.call(castRow.children, function (el, i) {
+      el.className = "cast" + (st.active.indexOf(i) >= 0 ? " active" : " dim");
+    });
+    document.getElementById("lp-title").textContent = st.t + (st.grad ? "  — gradients ON" : "");
+    document.getElementById("lp-desc").textContent = st.d;
+    document.getElementById("lp-count").textContent = "step " + (cur + 1) + " of " + steps.length;
+  }
+  document.getElementById("lp-prev").addEventListener("click", function () {
+    cur = (cur + steps.length - 1) % steps.length; drawLoop();
+  });
+  document.getElementById("lp-next").addEventListener("click", function () {
+    cur = (cur + 1) % steps.length; drawLoop();
+  });
+
+  /* ---- 2. memory map ---- */
+  var mmMedium = false;
+  seg(document.getElementById("mm-seg"), function (i) { mmMedium = i === 1; drawMM(); });
+  function drawMM() {
+    /* GB estimates */
+    var parts = mmMedium
+      ? [["bf16 weights ×4", 2.8], ["fp32 master + Adam", 4.3], ["gradients", 0.7], ["activations (ckpt)", 13.0], ["rollout buffers", 0.7]]
+      : [["bf16 weights ×4", 1.0], ["fp32 master + Adam", 1.5], ["gradients", 0.25], ["activations (ckpt)", 6.0], ["rollout buffers", 0.5]];
+    var budget = 24;
+    var colors = [cssv("--blue"), cssv("--violet"), cssv("--aqua"), cssv("--yellow"), cssv("--orange")];
+    var muted = cssv("--muted"), axis = cssv("--axis"), ink = cssv("--ink");
+    var x0 = 6, x1 = 354, y = 30, h = 26;
+    function X(gb) { return x0 + gb / budget * (x1 - x0); }
+    var s = '<rect x="' + x0 + '" y="' + y + '" width="' + (x1 - x0) + '" height="' + h + '" rx="6" fill="none" stroke="' + axis + '" stroke-width="1"/>';
+    var acc = 0, total = 0;
+    parts.forEach(function (p) { total += p[1]; });
+    var legendY = 100;
+    parts.forEach(function (p, i) {
+      var w = (p[1] / budget) * (x1 - x0) - 2;
+      s += '<rect x="' + (X(acc) + 1) + '" y="' + (y + 2) + '" width="' + Math.max(1, w) + '" height="' + (h - 4) + '" rx="4" fill="' + colors[i] + '"/>';
+      acc += p[1];
+      var ly = legendY + Math.floor(i / 2) * 20, lx = 6 + (i % 2) * 178;
+      s += '<rect x="' + lx + '" y="' + (ly - 8) + '" width="9" height="9" rx="2.5" fill="' + colors[i] + '"/>';
+      s += '<text x="' + (lx + 14) + '" y="' + ly + '" font-size="9" fill="' + muted + '">' + p[0] + " — " + p[1].toFixed(1) + " GB</text>";
+    });
+    s += '<text x="' + x0 + '" y="' + (y - 8) + '" font-size="9" fill="' + muted + '">0</text>';
+    s += '<text x="' + x1 + '" y="' + (y - 8) + '" text-anchor="end" font-size="9" fill="' + muted + '">24 GB</text>';
+    s += '<text x="' + Math.min(X(total) + 6, 290) + '" y="' + (y + h + 16) + '" font-size="9.5" font-weight="700" fill="' + ink + '">≈ ' + total.toFixed(1) + " GB peak</text>";
+    document.getElementById("mm-svg").innerHTML = s;
+    document.getElementById("mm-read").innerHTML = mmMedium
+      ? "355M: <b>tight</b> — this is why the spec says medium only has to compile and step, not train comfortably"
+      : "124M: <b>comfortable</b> — the headroom is your scaling budget";
+  }
+
+  /* ---- 3. diagnostics ---- */
+  var dxBad = false;
+  seg(document.getElementById("dx-seg"), function (i) { dxBad = i === 1; drawDX(); });
+  function rng(seed) {
+    return function () {
+      seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+      var t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  function series(bad) {
+    var N = 60, r1 = rng(7), out = { reward: [], kl: [], ent: [] };
+    for (var i = 0; i < N; i++) {
+      var x = i / (N - 1);
+      if (!bad) {
+        out.reward.push(1.45 * (1 - Math.exp(-3 * x)) + (r1() - 0.5) * 0.14);
+        out.kl.push(6.2 * Math.pow(x, 0.8) + (r1() - 0.5) * 0.5);
+        out.ent.push(2.4 - 0.7 * x + (r1() - 0.5) * 0.06);
+      } else {
+        out.reward.push(3.6 / (1 + Math.exp(-10 * (x - 0.45))) + 0.8 * (1 - Math.exp(-3 * x)) + (r1() - 0.5) * 0.18);
+        out.kl.push(Math.exp(4.2 * x) - 1 + (r1() - 0.5) * 0.8);
+        out.ent.push(2.4 * Math.exp(-4.5 * x) + 0.12 + (r1() - 0.5) * 0.04);
+      }
+    }
+    return out;
+  }
+  function miniChart(title, data, ymax, warnAbove) {
+    var blue = cssv("--blue"), grid = cssv("--grid"), muted = cssv("--muted"),
+        axis = cssv("--axis"), red = cssv("--red");
+    var W = 160, H = 110, x0 = 6, x1 = W - 6, ytop = 20, ybot = H - 14;
+    function X(i) { return x0 + i / (data.length - 1) * (x1 - x0); }
+    function Y(v) { return ybot - Math.max(0, Math.min(v, ymax)) / ymax * (ybot - ytop); }
+    var s = '<svg viewBox="0 0 ' + W + " " + H + '">';
+    s += '<text x="' + x0 + '" y="12" font-size="9" font-weight="650" fill="' + muted + '">' + title + "</text>";
+    s += '<line x1="' + x0 + '" y1="' + ybot + '" x2="' + x1 + '" y2="' + ybot + '" stroke="' + axis + '" stroke-width="1"/>';
+    s += '<line x1="' + x0 + '" y1="' + ytop + '" x2="' + x1 + '" y2="' + ytop + '" stroke="' + grid + '" stroke-width="1"/>';
+    s += '<text x="' + (x0 + 2) + '" y="' + (ytop - 2) + '" font-size="7.5" fill="' + muted + '">' + ymax + "</text>";
+    var pts = data.map(function (v, i) { return X(i).toFixed(1) + "," + Y(v).toFixed(1); });
+    var hot = warnAbove !== undefined && data[data.length - 1] > warnAbove;
+    s += '<polyline points="' + pts.join(" ") + '" fill="none" stroke="' + (hot ? red : blue) + '" stroke-width="1.8"/>';
+    s += "</svg>";
+    return s;
+  }
+  function drawDX() {
+    var d = series(dxBad);
+    var wrap = document.getElementById("dx-charts");
+    wrap.innerHTML =
+      "<div>" + miniChart("mean reward", d.reward, 4) + "</div>" +
+      "<div>" + miniChart("KL vs ref (k3, nats)", d.kl, 50, 12) + "</div>" +
+      "<div>" + miniChart("entropy (nats/token)", d.ent, 3) + "</div>";
+    document.getElementById("dx-note").innerHTML = dxBad
+      ? "Reward looks <em>great</em> — better than the healthy run. But KL has left its ~6-nat budget by an order of magnitude and entropy is flat on the floor: the policy is a deterministic RM-exploit generator. Reward alone would never have told you."
+      : "Reward saturating, KL settling near its budget, entropy declining but alive. Nothing to do here except keep the plots coming every 50 iterations.";
+  }
+
+  function all() { drawLoop(); drawMM(); drawDX(); }
+  all();
+  if (window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", all);
+  }
+})();
+</script>
+</body>
+</html>
